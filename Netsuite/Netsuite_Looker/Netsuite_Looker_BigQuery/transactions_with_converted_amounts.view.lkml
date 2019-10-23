@@ -110,11 +110,6 @@ view: transactions_with_converted_amounts {
           else null end as account_category
       from transactions_in_every_calculation_period_w_exchange_rates
       left join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id
-      left join netsuite.accounting_periods as reporting_accounting_period on reporting_accounting_period.accounting_period_id = transactions_in_every_calculation_period_w_exchange_rates.reporting_accounting_period_id
-      where reporting_accounting_period.fiscal_calendar_id = (select
-                                                               fiscal_calendar_id
-                                                             from netsuite.subsidiaries
-                                                             where parent_id is null)
        ;;
   }
 }
