@@ -66,7 +66,7 @@
     row: 0
     col: 0
     width: 24
-    height: 11
+    height: 9
   - title: Income Trend
     name: Income Trend
     model: netsuite
@@ -164,7 +164,7 @@
     listen:
       Period: income_statement.accounting_period_ending_month
       Is Accounting Period Closed: income_statement.is_accounting_period_closed
-    row: 11
+    row: 9
     col: 0
     width: 12
     height: 10
@@ -268,7 +268,7 @@
     listen:
       Period: income_statement.accounting_period_ending_month
       Is Accounting Period Closed: income_statement.is_accounting_period_closed
-    row: 11
+    row: 9
     col: 12
     width: 12
     height: 10

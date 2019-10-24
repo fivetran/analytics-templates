@@ -34,8 +34,7 @@ view: transactions_with_converted_amounts {
             when lower(accounts.general_rate_type) = 'current' then period_exchange_rate_map.current_rate
             when lower(accounts.general_rate_type) = 'average' then period_exchange_rate_map.average_rate
             else null
-            end as exchange_rate,
-          period_exchange_rate_map.current_rate as CTA_control_current_exchange_rate
+            end as exchange_rate
         from netsuite.accounts
         cross join period_exchange_rate_map
       ), transaction_lines_w_accounting_period as ( -- transaction line totals, by accounts, accounting period and subsidiary
@@ -83,8 +82,7 @@ view: transactions_with_converted_amounts {
         select
           transactions_in_every_calculation_period.*,
           exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,
-          exchange_transaction_period.exchange_rate as exchange_rate_transaction_period,
-          exchange_transaction_period.CTA_control_current_exchange_rate as CTA_control_current_exchange_rate
+          exchange_transaction_period.exchange_rate as exchange_rate_transaction_period
         from transactions_in_every_calculation_period
         left join accountXperiod_exchange_rate_map as exchange_reporting_period
           on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id
@@ -97,9 +95,8 @@ view: transactions_with_converted_amounts {
       )
       select
         transactions_in_every_calculation_period_w_exchange_rates.*,
-        unconverted_amount * exchange_rate_transaction_period as converted_amount_using_transaction_accounting_period,
         unconverted_amount * exchange_rate_reporting_period as converted_amount_using_reporting_month,
-        unconverted_amount * CTA_control_current_exchange_rate as converted_amount_using_cta_control,
+        unconverted_amount * exchange_rate_transaction_period as converted_amount_using_transaction_accounting_period,
         case
           when lower(accounts.type_name) in ('income','other income','expense','other expense','other income','cost of goods sold') then true
           else false
