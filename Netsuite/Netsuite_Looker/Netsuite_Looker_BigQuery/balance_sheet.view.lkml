@@ -28,7 +28,7 @@ view: balance_sheet {
           else accounts.accountnumber
           end as account_number,
         case
-          when lower(accounts.is_balancesheet) = 'f' or lower(account_category) = 'equity' then -converted_amount_using_transaction_accounting_period
+          when lower(accounts.is_balancesheet) = 'f' or lower(transactions_with_converted_amounts.account_category) = 'equity' then -converted_amount_using_transaction_accounting_period
           when lower(accounts.is_leftside) = 'f' then -converted_amount_using_reporting_month
           when lower(accounts.is_leftside) = 't' then converted_amount_using_reporting_month
           else 0
@@ -82,7 +82,8 @@ view: balance_sheet {
         null as account_number,
         case
           when lower(account_category) = 'equity' or is_income_statement then converted_amount_using_transaction_accounting_period
-          else converted_amount_using_reporting_month end as converted_amount,
+          else converted_amount_using_reporting_month 
+          end as converted_amount,
         16 as balance_sheet_sort_helper
       from transactions_with_converted_amounts as transactions_with_converted_amounts
       left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
