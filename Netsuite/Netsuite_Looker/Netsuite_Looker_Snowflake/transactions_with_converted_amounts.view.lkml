@@ -10,14 +10,8 @@ view: transactions_with_converted_amounts {
           consolidated_exchange_rates.from_subsidiary_id,
           consolidated_exchange_rates.to_subsidiary_id
         from netsuite.consolidated_exchange_rates
-        where consolidated_exchange_rates.to_subsidiary_id in (select
-                                                                subsidiary_id
-                                                              from netsuite.subsidiaries
-                                                              where parent_id is null)  -- constrait - only the primary subsidiary has no parent
-          and consolidated_exchange_rates.accounting_book_id in (select
-                                                                  accounting_book_id
-                                                                from netsuite.accounting_books
-                                                                where lower(is_primary) = 'yes')
+        where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  -- constrait - only the primary subsidiary has no parent
+          and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = 'yes')
           and not consolidated_exchange_rates._fivetran_deleted
       ), accountxperiod_exchange_rate_map as ( -- account table with exchange rate details by accounting period
         select
@@ -59,10 +53,7 @@ view: transactions_with_converted_amounts {
           and multiplier.starting <= current_timestamp()
         where lower(base.quarter) = 'no'
           and lower(base.year_0) = 'no'
-          and base.fiscal_calendar_id = (select 
-                                          fiscal_calendar_id
-                                        from netsuite.subsidiaries
-                                        where parent_id is null) -- fiscal calendar will align with parent subsidiary's default calendar
+          and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) -- fiscal calendar will align with parent subsidiary's default calendar
         group by 1
       ), flattened_period_id_list_to_current_period as (
         select

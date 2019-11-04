@@ -74,24 +74,25 @@ view: transaction_details {
       left join netsuite.accounting_periods on accounting_periods.accounting_period_id = transactions.accounting_period_id
       left join netsuite.income_accounts on income_accounts.income_account_id = accounts.account_id
       left join netsuite.expense_accounts on expense_accounts.expense_account_id = accounts.account_id
-      left join netsuite.customers on customers.customer_id = transaction_lines.company_id
-        and not customers._fivetran_deleted
-      left join netsuite.items on items.item_id = transaction_lines.item_id
-        and not items._fivetran_deleted
-      left join netsuite.locations on locations.location_id = transaction_lines.location_id
-      left join netsuite.vendors on vendors.vendor_id = transaction_lines.company_id
+      left join netsuite.companies on companies.company_id = transaction_lines.company_id
+        and not companies._fivetran_deleted
+      left join netsuite.vendors on vendors.vendor_id = companies.company_id
         and not vendors._fivetran_deleted
       left join netsuite.vendor_types on vendor_types.vendor_type_id = vendors.vendor_type_id
         and not vendor_types._fivetran_deleted
+      left join netsuite.customers on customers.customer_id = companies.company_id
+        and not customers._fivetran_deleted
+      left join netsuite.partners on partners.partner_id = companies.company_id
+        and not partners._fivetran_deleted
+      left join netsuite.items on items.item_id = transaction_lines.item_id
+        and not items._fivetran_deleted
+      left join netsuite.locations on locations.location_id = transaction_lines.location_id
       left join netsuite.currencies on currencies.currency_id = transactions.currency_id
         and not currencies._fivetran_deleted
       left join netsuite.departments on departments.department_id = transaction_lines.department_id
       left join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id
       where (accounting_periods.fiscal_calendar_id is null
-        or accounting_periods.fiscal_calendar_id  = (select
-                                                      fiscal_calendar_id
-                                                    from netsuite.subsidiaries
-                                                    where parent_id is null))
+        or accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null))
        ;;
   }
 

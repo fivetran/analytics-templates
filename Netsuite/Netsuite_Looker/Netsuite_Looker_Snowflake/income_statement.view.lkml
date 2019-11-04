@@ -34,10 +34,7 @@ view: income_statement {
       left join netsuite.departments on departments.department_id = transaction_lines.department_id
       left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
       left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
-      where reporting_accounting_periods.fiscal_calendar_id  = (select
-                                                                  fiscal_calendar_id
-                                                                from netsuite.subsidiaries
-                                                                where parent_id is null)
+      where reporting_accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)
         and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
         and transactions_with_converted_amounts.is_income_statement
       ;;
