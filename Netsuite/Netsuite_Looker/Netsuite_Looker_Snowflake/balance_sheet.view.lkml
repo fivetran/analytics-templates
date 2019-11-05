@@ -55,14 +55,8 @@ view: balance_sheet {
       left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
       left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
       left join netsuite.accounting_periods as transaction_accounting_periods on transaction_accounting_periods.accounting_period_id = transactions_with_converted_amounts.transaction_accounting_period_id
-      where reporting_accounting_periods.fiscal_calendar_id = (select 
-                                                                fiscal_calendar_id 
-                                                              from netsuite.subsidiaries 
-                                                              where parent_id is null)
-        and transaction_accounting_periods.fiscal_calendar_id = (select 
-                                                                  fiscal_calendar_id 
-                                                                from netsuite.subsidiaries 
-                                                                where parent_id is null)
+      where reporting_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)
+        and transaction_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)
         and (lower(accounts.is_balancesheet) = 't' 
           or transactions_with_converted_amounts.is_income_statement)
         
@@ -87,10 +81,7 @@ view: balance_sheet {
       from ${transactions_with_converted_amounts.SQL_TABLE_NAME} as transactions_with_converted_amounts
       left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
       left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
-      where reporting_accounting_periods.fiscal_calendar_id = (select
-                                                                fiscal_calendar_id
-                                                              from netsuite.subsidiaries
-                                                              where parent_id is null)
+      where reporting_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)
         and (lower(accounts.is_balancesheet) = 't'
           or transactions_with_converted_amounts.is_income_statement)
       ;;
