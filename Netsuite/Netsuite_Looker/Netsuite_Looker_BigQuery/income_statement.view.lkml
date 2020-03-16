@@ -26,14 +26,14 @@ view: income_statement {
           else null
           end as income_statement_sort_helper
       from ${transactions_with_converted_amounts.SQL_TABLE_NAME} as transactions_with_converted_amounts
-      left join netsuite.transaction_lines as transaction_lines
+      join netsuite.transaction_lines as transaction_lines
         on transaction_lines.transaction_line_id = transactions_with_converted_amounts.transaction_line_id
         and transaction_lines.transaction_id = transactions_with_converted_amounts.transaction_id
       left join netsuite.classes on classes.class_id = transaction_lines.class_id
       left join netsuite.locations on locations.location_id = transaction_lines.location_id
       left join netsuite.departments on departments.department_id = transaction_lines.department_id
-      left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
-      left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
+      join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
+      join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
       where reporting_accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)
         and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
         and transactions_with_converted_amounts.is_income_statement
