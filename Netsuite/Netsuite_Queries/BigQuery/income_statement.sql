@@ -69,11 +69,11 @@ with transactions_with_converted_amounts as (
       exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,
       exchange_transaction_period.exchange_rate as exchange_rate_transaction_period
     from transactions_in_every_calculation_period
-    left join accountXperiod_exchange_rate_map as exchange_reporting_period
+    join accountXperiod_exchange_rate_map as exchange_reporting_period
       on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id
       and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id
       and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id
-    left join accountXperiod_exchange_rate_map as exchange_transaction_period
+    join accountXperiod_exchange_rate_map as exchange_transaction_period
       on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id
       and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id
       and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id
@@ -94,7 +94,7 @@ with transactions_with_converted_amounts as (
       when lower(accounts.type_name) in ('equity', 'retained earnings', 'net income') then 'Equity'
       else null end as account_category
   from transactions_in_every_calculation_period_w_exchange_rates
-  left join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id
+  join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id
 )
 
 select
@@ -122,14 +122,14 @@ select
     else null
     end as income_statement_sort_helper
 from transactions_with_converted_amounts as transactions_with_converted_amounts
-left join netsuite.transaction_lines as transaction_lines
+join netsuite.transaction_lines as transaction_lines
   on transaction_lines.transaction_line_id = transactions_with_converted_amounts.transaction_line_id
   and transaction_lines.transaction_id = transactions_with_converted_amounts.transaction_id
 left join netsuite.classes on classes.class_id = transaction_lines.class_id
 left join netsuite.locations on locations.location_id = transaction_lines.location_id
 left join netsuite.departments on departments.department_id = transaction_lines.department_id
-left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
-left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
+join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id
+join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
 where reporting_accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)
   and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id
   and transactions_with_converted_amounts.is_income_statement
