@@ -67,10 +67,10 @@
     sorts: [net_income desc]
     limit: 500
     dynamic_fields: [{table_calculation: net_income, label: Net Income, expression: "(sum(if(${income_statement.account_type_name}\
-          \ = \"Income\",${income_statement.sum_converted_amount},0)) \n- \nsum(if(${income_statement.account_type_name}\
+          \ = \"Income\",${income_statement.sum_converted_amount},0)) \n+ \nsum(if(${income_statement.account_type_name}\
           \ = \"Cost of Goods Sold\",${income_statement.sum_converted_amount},0))\n\
-          -\nsum(if(${income_statement.account_type_name} = \"Expense\",${income_statement.sum_converted_amount},0))\n\
-          -\nsum(if(${income_statement.account_type_name} = \"Other Expense\",${income_statement.sum_converted_amount},0))\n\
+          +\nsum(if(${income_statement.account_type_name} = \"Expense\",${income_statement.sum_converted_amount},0))\n\
+          +\nsum(if(${income_statement.account_type_name} = \"Other Expense\",${income_statement.sum_converted_amount},0))\n\
           +\nsum(if(${income_statement.account_type_name} = \"Other Income\",${income_statement.sum_converted_amount},0))\n\
           )\n/\nsum(if(${income_statement.account_type_name} = \"Income\",${income_statement.sum_converted_amount},1))",
         value_format: !!null '', value_format_name: percent_1, _kind_hint: measure,

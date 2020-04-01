@@ -65,7 +65,7 @@ with period_exchange_rate_map as ( -- exchange rates used, by accounting period,
     exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,
     exchange_transaction_period.exchange_rate as exchange_rate_transaction_period
   from transaction_lines_w_accounting_period
-  inner join flattened_period_id_list_to_current_period on flattened_period_id_list_to_current_period.accounting_period_id = transaction_lines_w_accounting_period.transaction_accounting_period_id 
+  join flattened_period_id_list_to_current_period on flattened_period_id_list_to_current_period.accounting_period_id = transaction_lines_w_accounting_period.transaction_accounting_period_id 
   join accountxperiod_exchange_rate_map as exchange_reporting_period
     on exchange_reporting_period.accounting_period_id = flattened_period_id_list_to_current_period.reporting_accounting_period_id
     and exchange_reporting_period.account_id = transaction_lines_w_accounting_period.account_id

@@ -90,7 +90,7 @@ view: transaction_details {
       left join netsuite.currencies on currencies.currency_id = transactions.currency_id
         and not currencies._fivetran_deleted
       left join netsuite.departments on departments.department_id = transaction_lines.department_id
-      left join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id
+      join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id
       where (accounting_periods.fiscal_calendar_id is null
         or accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null))
        ;;
