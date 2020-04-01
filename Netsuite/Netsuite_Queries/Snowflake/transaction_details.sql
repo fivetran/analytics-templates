@@ -65,12 +65,12 @@ with period_exchange_rate_map as ( -- exchange rates used, by accounting period,
     exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,
     exchange_transaction_period.exchange_rate as exchange_rate_transaction_period
   from transaction_lines_w_accounting_period
-  inner join flattened_period_id_list_to_current_period on flattened_period_id_list_to_current_period.accounting_period_id = transaction_lines_w_accounting_period.transaction_accounting_period_id 
-  left join accountxperiod_exchange_rate_map as exchange_reporting_period
+  join flattened_period_id_list_to_current_period on flattened_period_id_list_to_current_period.accounting_period_id = transaction_lines_w_accounting_period.transaction_accounting_period_id 
+  join accountxperiod_exchange_rate_map as exchange_reporting_period
     on exchange_reporting_period.accounting_period_id = flattened_period_id_list_to_current_period.reporting_accounting_period_id
     and exchange_reporting_period.account_id = transaction_lines_w_accounting_period.account_id
     and exchange_reporting_period.from_subsidiary_id = transaction_lines_w_accounting_period.subsidiary_id
-  left join accountxperiod_exchange_rate_map as exchange_transaction_period
+  join accountxperiod_exchange_rate_map as exchange_transaction_period
     on exchange_transaction_period.accounting_period_id = flattened_period_id_list_to_current_period.accounting_period_id
     and exchange_transaction_period.account_id = transaction_lines_w_accounting_period.account_id
     and exchange_transaction_period.from_subsidiary_id = transaction_lines_w_accounting_period.subsidiary_id
@@ -92,7 +92,7 @@ with period_exchange_rate_map as ( -- exchange rates used, by accounting period,
       else null 
       end as account_category
   from transactions_in_every_calculation_period_w_exchange_rates
-  left join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id 
+  join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id 
 )
 select
   transaction_lines.transaction_line_id,
@@ -179,6 +179,6 @@ left join netsuite.vendor_types on vendor_types.vendor_type_id = vendors.vendor_
 left join netsuite.currencies on currencies.currency_id = transactions.currency_id
   and not currencies._fivetran_deleted
 left join netsuite.departments on departments.department_id = transaction_lines.department_id
-left join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id
+join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id
 where (accounting_periods.fiscal_calendar_id is null
   or accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null))
