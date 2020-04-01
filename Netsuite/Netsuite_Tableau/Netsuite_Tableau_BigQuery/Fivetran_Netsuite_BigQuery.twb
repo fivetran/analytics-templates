@@ -18,14 +18,372 @@
     <preference name='ui.shelf.height' value='26' />
   </preferences>
   <datasources>
+    <datasource caption='Balance Sheet' inline='true' name='federated.0ggpjke1y9yu8m1dosxmx1k711l5' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='BigQuery' name='bigquery.11r6qsl193c1gv15qqnk51fdtkpa'>
+            <connection CATALOG='' EXECCATALOG='' REDIRECT_URI='urn:ietf:wg:oauth:2.0:oob' SCOPE='email profile https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/cloudplatformprojects.readonly' authentication='yes' bq-fetch-rows='' bq-fetch-tasks='' bq-large-fetch-rows='' bq-response-rows='' class='bigquery' connection-dialect='google-sql' project='' schema='netsuite' server='' server-oauth='' username='' />
+          </named-connection>
+        </named-connections>
+        <relation connection='bigquery.11r6qsl193c1gv15qqnk51fdtkpa' name='balance_sheet' type='text'>with transactions_with_converted_amounts as (&#10;  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */&#10;    select&#10;      consolidated_exchange_rates.accounting_period_id,&#10;      consolidated_exchange_rates.average_rate,&#10;      consolidated_exchange_rates.current_rate,&#10;      consolidated_exchange_rates.historical_rate,&#10;      consolidated_exchange_rates.from_subsidiary_id,&#10;      consolidated_exchange_rates.to_subsidiary_id&#10;    from netsuite.consolidated_exchange_rates&#10;    where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  /* constrait - only the primary subsidiary has no parent */&#10;      and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = &apos;yes&apos; )&#10;      and not consolidated_exchange_rates._fivetran_deleted&#10;  ), accountXperiod_exchange_rate_map as ( /* account table with exchange rate details by accounting period */&#10;    select&#10;      period_exchange_rate_map.accounting_period_id,&#10;      period_exchange_rate_map.from_subsidiary_id,&#10;      period_exchange_rate_map.to_subsidiary_id,&#10;      accounts.account_id,&#10;      case&#10;        when lower(accounts.general_rate_type) = &apos;historical&apos; then period_exchange_rate_map.historical_rate&#10;        when lower(accounts.general_rate_type) = &apos;current&apos; then period_exchange_rate_map.current_rate&#10;        when lower(accounts.general_rate_type) = &apos;average&apos; then period_exchange_rate_map.average_rate&#10;        else null&#10;        end as exchange_rate&#10;    from netsuite.accounts&#10;    cross join period_exchange_rate_map&#10;  ), transaction_lines_w_accounting_period as ( /* transaction line totals, by accounts, accounting period and subsidiary */&#10;    select&#10;      transaction_lines.transaction_id,&#10;      transaction_lines.transaction_line_id,&#10;      transaction_lines.subsidiary_id,&#10;      transaction_lines.account_id,&#10;      transactions.accounting_period_id as transaction_accounting_period_id,&#10;      coalesce(transaction_lines.amount, 0) as unconverted_amount&#10;    from netsuite.transaction_lines&#10;    join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;    where not transactions._fivetran_deleted&#10;      and lower(transactions.transaction_type) != &apos;revenue arrangement&apos;&#10;      and lower(non_posting_line) != &apos;yes&apos;&#10;  ), period_id_list_to_current_period as ( /* period ids with all future period ids.  this is needed to calculate cumulative totals by correct exchange rates. */&#10;    select&#10;      base.accounting_period_id,&#10;      array_agg(multiplier.accounting_period_id order by multiplier.accounting_period_id) as accounting_periods_to_include_for&#10;    from netsuite.accounting_periods as base&#10;    join netsuite.accounting_periods as multiplier&#10;      on multiplier.starting &gt;&gt;= base.starting&#10;      and multiplier.quarter = base.quarter&#10;      and multiplier.year_0 = base.year_0&#10;      and multiplier.fiscal_calendar_id = base.fiscal_calendar_id&#10;      and multiplier.starting &lt;&lt;= current_timestamp()&#10;    where lower(base.quarter) = &apos;no&apos;&#10;      and lower(base.year_0) = &apos;no&apos;&#10;      and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) /* fiscal calendar will align with parent subsidiary&apos;s default calendar */&#10;    group by 1&#10;  ), transactions_in_every_calculation_period as (&#10;    select&#10;      transaction_lines_w_accounting_period.*,&#10;      reporting_accounting_period_id&#10;    from transaction_lines_w_accounting_period,&#10;      unnest((select&#10;                accounting_periods_to_include_for&#10;              from period_id_list_to_current_period&#10;              where period_id_list_to_current_period.accounting_period_id&#10;              = transaction_lines_w_accounting_period.transaction_accounting_period_id)) as reporting_accounting_period_id&#10;  ), transactions_in_every_calculation_period_w_exchange_rates as (&#10;    select&#10;      transactions_in_every_calculation_period.*,&#10;      exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,&#10;      exchange_transaction_period.exchange_rate as exchange_rate_transaction_period&#10;    from transactions_in_every_calculation_period&#10;    left join accountXperiod_exchange_rate_map as exchange_reporting_period&#10;      on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id&#10;      and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;    left join accountXperiod_exchange_rate_map as exchange_transaction_period&#10;      on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id&#10;      and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;  )&#10;  select&#10;    transactions_in_every_calculation_period_w_exchange_rates.*,&#10;    unconverted_amount * exchange_rate_reporting_period as converted_amount_using_reporting_month,&#10;    unconverted_amount * exchange_rate_transaction_period as converted_amount_using_transaction_accounting_period,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;income&apos;,&apos;other income&apos;,&apos;expense&apos;,&apos;other expense&apos;,&apos;other income&apos;,&apos;cost of goods sold&apos;) then true&#10;      else false&#10;      end as is_income_statement,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;accounts receivable&apos;, &apos;bank&apos;, &apos;deferred expense&apos;, &apos;fixed asset&apos;, &apos;other asset&apos;, &apos;other current asset&apos;, &apos;unbilled receivable&apos;) then &apos;Asset&apos;&#10;      when lower(accounts.type_name) in (&apos;cost of goods sold&apos;, &apos;expense&apos;, &apos;other expense&apos;) then &apos;Expense&apos;&#10;      when lower(accounts.type_name) in (&apos;income&apos;, &apos;other income&apos;) then &apos;Income&apos;&#10;      when lower(accounts.type_name) in (&apos;accounts payable&apos;, &apos;credit card&apos;, &apos;deferred revenue&apos;, &apos;long term liability&apos;, &apos;other current liability&apos;) then &apos;Liability&apos;&#10;      when lower(accounts.type_name) in (&apos;equity&apos;, &apos;retained earnings&apos;, &apos;net income&apos;) then &apos;Equity&apos;&#10;      else null end as account_category&#10;  from transactions_in_every_calculation_period_w_exchange_rates&#10;  left join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id&#10;)&#10;select&#10;  reporting_accounting_periods.accounting_period_id as ACCOUNTING_PERIOD_ID,&#10;  reporting_accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  reporting_accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  reporting_accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(reporting_accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(reporting_accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  transactions_with_converted_amounts.account_category as ACCOUNT_CATEGORY,&#10;  case&#10;    when (lower(accounts.is_balancesheet) = &apos;f&apos; and reporting_accounting_periods.year_id = transaction_accounting_periods.year_id) then &apos;Net Income&apos;&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then &apos;Retained Earnings&apos;&#10;    else accounts.name&#10;    end as ACCOUNT_NAME,&#10;  case&#10;    when (lower(accounts.is_balancesheet) = &apos;f&apos; and reporting_accounting_periods.year_id = transaction_accounting_periods.year_id) then &apos;Net Income&apos;&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then &apos;Retained Earnings&apos;&#10;    else accounts.type_name&#10;    end as ACCOUNT_TYPE_NAME,&#10;  case&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then null&#10;    else accounts.account_id&#10;    end as ACCOUNT_ID,&#10;  case&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then null&#10;    else accounts.accountnumber&#10;    end as ACCOUNT_NUMBER,&#10;  case&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; or lower(transactions_with_converted_amounts.account_category) = &apos;equity&apos; then -converted_amount_using_transaction_accounting_period&#10;    when lower(accounts.is_leftside) = &apos;f&apos; then -converted_amount_using_reporting_month&#10;    when lower(accounts.is_leftside) = &apos;t&apos; then converted_amount_using_reporting_month&#10;    else 0&#10;    end as CONVERTED_AMOUNT,&#10;  case&#10;    when lower(accounts.type_name) = &apos;bank&apos; then 1&#10;    when lower(accounts.type_name) = &apos;accounts receivable&apos; then 2&#10;    when lower(accounts.type_name) = &apos;unbilled receivable&apos; then 3&#10;    when lower(accounts.type_name) = &apos;other current asset&apos; then 4&#10;    when lower(accounts.type_name) = &apos;fixed asset&apos; then 5&#10;    when lower(accounts.type_name) = &apos;other asset&apos; then 6&#10;    when lower(accounts.type_name) = &apos;deferred expense&apos; then 7&#10;    when lower(accounts.type_name) = &apos;accounts payable&apos; then 8&#10;    when lower(accounts.type_name) = &apos;credit card&apos; then 9&#10;    when lower(accounts.type_name) = &apos;other current liability&apos; then 10&#10;    when lower(accounts.type_name) = &apos;long term liability&apos; then 11&#10;    when lower(accounts.type_name) = &apos;deferred revenue&apos; then 12&#10;    when lower(accounts.type_name) = &apos;equity&apos; then 13&#10;    when (lower(accounts.is_balancesheet) = &apos;f&apos; and reporting_accounting_periods.year_id = transaction_accounting_periods.year_id) then 15&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then 14&#10;    else null&#10;    end as BALANCE_SHEET_SORT_HELPER&#10;from transactions_with_converted_amounts as transactions_with_converted_amounts&#10;left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id&#10;left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;left join netsuite.accounting_periods as transaction_accounting_periods on transaction_accounting_periods.accounting_period_id = transactions_with_converted_amounts.transaction_accounting_period_id&#10;where reporting_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and transaction_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and (lower(accounts.is_balancesheet) = &apos;t&apos;&#10;    or transactions_with_converted_amounts.is_income_statement)&#10;&#10;union all&#10;&#10;select&#10;  reporting_accounting_periods.accounting_period_id as ACCOUNTING_PERIOD_ID,&#10;  reporting_accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  reporting_accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  reporting_accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(reporting_accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(reporting_accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  &apos;Equity&apos; as ACCOUNT_CATEGORY,&#10;  &apos;Cumulative Translation Adjustment&apos; as ACCOUNT_NAME,&#10;  &apos;Cumulative Translation Adjustment&apos; as ACCOUNT_TYPE_NAME,&#10;  null as ACCOUNT_ID,&#10;  null as ACCOUNT_NUMBER,&#10;  case&#10;    when lower(account_category) = &apos;equity&apos; or is_income_statement then converted_amount_using_transaction_accounting_period&#10;    else converted_amount_using_reporting_month &#10;    end as CONVERTED_AMOUNT,&#10;  16 as BALANCE_SHEET_SORT_HELPER&#10;from transactions_with_converted_amounts as transactions_with_converted_amounts&#10;left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id&#10;left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;where reporting_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and (lower(accounts.is_balancesheet) = &apos;t&apos;&#10;    or transactions_with_converted_amounts.is_income_statement)</relation>
+        <metadata-records>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_ID</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_ID]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_ID</remote-alias>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_ENDING</remote-name>
+            <remote-type>7</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_ENDING]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_ENDING</remote-alias>
+            <local-type>datetime</local-type>
+            <aggregation>Year</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_FULL_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_FULL_NAME]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_FULL_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_NAME]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-name>
+            <remote-type>11</remote-type>
+            <local-name>[IS_ACCOUNTING_PERIOD_ADJUSTMENT]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-alias>
+            <local-type>boolean</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>IS_ACCOUNTING_PERIOD_CLOSED</remote-name>
+            <remote-type>11</remote-type>
+            <local-name>[IS_ACCOUNTING_PERIOD_CLOSED]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>IS_ACCOUNTING_PERIOD_CLOSED</remote-alias>
+            <local-type>boolean</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_CATEGORY</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_CATEGORY]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNT_CATEGORY</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_NAME]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNT_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_TYPE_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_TYPE_NAME]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNT_TYPE_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_ID</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[ACCOUNT_ID]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNT_ID</remote-alias>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_NUMBER</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_NUMBER]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>ACCOUNT_NUMBER</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>CONVERTED_AMOUNT</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[CONVERTED_AMOUNT]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>CONVERTED_AMOUNT</remote-alias>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>BALANCE_SHEET_SORT_HELPER</remote-name>
+            <remote-type>20</remote-type>
+            <local-name>[BALANCE_SHEET_SORT_HELPER]</local-name>
+            <parent-name>[balance_sheet]</parent-name>
+            <remote-alias>BALANCE_SHEET_SORT_HELPER</remote-alias>
+            <local-type>integer</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+        </metadata-records>
+      </connection>
+      <aliases enabled='yes' />
+      <column aggregation='Sum' datatype='integer' name='[BALANCE_SHEET_SORT_HELPER]' role='dimension' type='ordinal' />
+      <column datatype='integer' name='[Number of Records]' role='measure' type='quantitative' user:auto-column='numrec'>
+        <calculation class='tableau' formula='1' />
+      </column>
+      <layout dim-ordering='alphabetic' dim-percentage='0.626667' measure-ordering='alphabetic' measure-percentage='0.373333' show-structure='true' />
+      <semantic-values>
+        <semantic-value key='[Country].[Name]' value='&quot;United States&quot;' />
+      </semantic-values>
+      <field-sort-info field-sort-order-type='custom-order'>
+        <field-sort-custom-order field='ACCOUNTING_PERIOD_ID' />
+        <field-sort-custom-order field='ACCOUNTING_PERIOD_ENDING' />
+        <field-sort-custom-order field='ACCOUNTING_PERIOD_FULL_NAME' />
+        <field-sort-custom-order field='ACCOUNTING_PERIOD_NAME' />
+        <field-sort-custom-order field='ACCOUNTING_PERIOD_IS_ADJUSTMENT' />
+        <field-sort-custom-order field='ACCOUNT_NAME' />
+        <field-sort-custom-order field='ACCOUNT_TYPE_NAME' />
+        <field-sort-custom-order field='ACCOUNT_ID' />
+        <field-sort-custom-order field='ACCOUNT_NUMBER' />
+        <field-sort-custom-order field='CONVERTED_AMOUNT' />
+        <field-sort-custom-order field='Calculation_68750306296590336' />
+        <field-sort-custom-order field='BALANCE_SHEET_SORT_HELPER' />
+        <field-sort-custom-order field='ACCOUNT_CATEGORY' />
+      </field-sort-info>
+    </datasource>
+    <datasource caption='Income Statement' inline='true' name='federated.1y90zz21qenhz81frqyhy06hh5op' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='BigQuery' name='bigquery.1x71co002l14131el859u1310vby'>
+            <connection CATALOG='' EXECCATALOG='' REDIRECT_URI='urn:ietf:wg:oauth:2.0:oob' SCOPE='email profile https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/cloudplatformprojects.readonly' authentication='yes' bq-fetch-rows='' bq-fetch-tasks='' bq-large-fetch-rows='' bq-response-rows='' class='bigquery' connection-dialect='google-sql' project='' schema='' server='' server-oauth='' username='' />
+          </named-connection>
+        </named-connections>
+        <relation connection='bigquery.1x71co002l14131el859u1310vby' name='income_statement' type='text'>with transactions_with_converted_amounts as (&#10;  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */&#10;    select&#10;      consolidated_exchange_rates.accounting_period_id,&#10;      consolidated_exchange_rates.average_rate,&#10;      consolidated_exchange_rates.current_rate,&#10;      consolidated_exchange_rates.historical_rate,&#10;      consolidated_exchange_rates.from_subsidiary_id,&#10;      consolidated_exchange_rates.to_subsidiary_id&#10;    from netsuite.consolidated_exchange_rates&#10;    where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  /* constrait - only the primary subsidiary has no parent */&#10;      and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = &apos;yes&apos; )&#10;      and not consolidated_exchange_rates._fivetran_deleted&#10;  ), accountXperiod_exchange_rate_map as ( /* account table with exchange rate details by accounting period */&#10;    select&#10;      period_exchange_rate_map.accounting_period_id,&#10;      period_exchange_rate_map.from_subsidiary_id,&#10;      period_exchange_rate_map.to_subsidiary_id,&#10;      accounts.account_id,&#10;      case&#10;        when lower(accounts.general_rate_type) = &apos;historical&apos; then period_exchange_rate_map.historical_rate&#10;        when lower(accounts.general_rate_type) = &apos;current&apos; then period_exchange_rate_map.current_rate&#10;        when lower(accounts.general_rate_type) = &apos;average&apos; then period_exchange_rate_map.average_rate&#10;        else null&#10;        end as exchange_rate&#10;    from netsuite.accounts&#10;    cross join period_exchange_rate_map&#10;  ), transaction_lines_w_accounting_period as ( /* transaction line totals, by accounts, accounting period and subsidiary */&#10;    select&#10;      transaction_lines.transaction_id,&#10;      transaction_lines.transaction_line_id,&#10;      transaction_lines.subsidiary_id,&#10;      transaction_lines.account_id,&#10;      transactions.accounting_period_id as transaction_accounting_period_id,&#10;      coalesce(transaction_lines.amount, 0) as unconverted_amount&#10;    from netsuite.transaction_lines&#10;    join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;    where not transactions._fivetran_deleted&#10;      and lower(transactions.transaction_type) != &apos;revenue arrangement&apos;&#10;      and lower(non_posting_line) != &apos;yes&apos;&#10;  ), period_id_list_to_current_period as ( /* period ids with all future period ids.  this is needed to calculate cumulative totals by correct exchange rates. */&#10;    select&#10;      base.accounting_period_id,&#10;      array_agg(multiplier.accounting_period_id order by multiplier.accounting_period_id) as accounting_periods_to_include_for&#10;    from netsuite.accounting_periods as base&#10;    join netsuite.accounting_periods as multiplier&#10;      on multiplier.starting &gt;&gt;= base.starting&#10;      and multiplier.quarter = base.quarter&#10;      and multiplier.year_0 = base.year_0&#10;      and multiplier.fiscal_calendar_id = base.fiscal_calendar_id&#10;      and multiplier.starting &lt;&lt;= current_timestamp()&#10;    where lower(base.quarter) = &apos;no&apos;&#10;      and lower(base.year_0) = &apos;no&apos;&#10;      and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) /* fiscal calendar will align with parent subsidiary&apos;s default calendar */&#10;    group by 1&#10;  ), transactions_in_every_calculation_period as (&#10;    select&#10;      transaction_lines_w_accounting_period.*,&#10;      reporting_accounting_period_id&#10;    from transaction_lines_w_accounting_period,&#10;      unnest((select&#10;                accounting_periods_to_include_for&#10;              from period_id_list_to_current_period&#10;              where period_id_list_to_current_period.accounting_period_id&#10;              = transaction_lines_w_accounting_period.transaction_accounting_period_id)) as reporting_accounting_period_id&#10;  ), transactions_in_every_calculation_period_w_exchange_rates as (&#10;    select&#10;      transactions_in_every_calculation_period.*,&#10;      exchange_reporting_period.exchange_rate as EXCHANGE_RATE_REPORTING_PERIOD,&#10;      exchange_transaction_period.exchange_rate as EXCHANGE_RATE_TRANSACTION_PERIOD&#10;    from transactions_in_every_calculation_period&#10;    left join accountXperiod_exchange_rate_map as exchange_reporting_period&#10;      on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id&#10;      and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;    left join accountXperiod_exchange_rate_map as exchange_transaction_period&#10;      on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id&#10;      and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;  )&#10;  select&#10;    transactions_in_every_calculation_period_w_exchange_rates.*,&#10;    unconverted_amount * exchange_rate_reporting_period as CONVERTED_AMOUNT_USING_REPORTING_MONTH,&#10;    unconverted_amount * exchange_rate_transaction_period as CONVERTED_AMOUNT_USING_TRANSACTION_ACCOUNTING_PERIOD,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;income&apos;,&apos;other income&apos;,&apos;expense&apos;,&apos;other expense&apos;,&apos;other income&apos;,&apos;cost of goods sold&apos;) then true&#10;      else false&#10;      end as IS_INCOME_STATEMENT,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;accounts receivable&apos;, &apos;bank&apos;, &apos;deferred expense&apos;, &apos;fixed asset&apos;, &apos;other asset&apos;, &apos;other current asset&apos;, &apos;unbilled receivable&apos;) then &apos;Asset&apos;&#10;      when lower(accounts.type_name) in (&apos;cost of goods sold&apos;, &apos;expense&apos;, &apos;other expense&apos;) then &apos;Expense&apos;&#10;      when lower(accounts.type_name) in (&apos;income&apos;, &apos;other income&apos;) then &apos;Income&apos;&#10;      when lower(accounts.type_name) in (&apos;accounts payable&apos;, &apos;credit card&apos;, &apos;deferred revenue&apos;, &apos;long term liability&apos;, &apos;other current liability&apos;) then &apos;Liability&apos;&#10;      when lower(accounts.type_name) in (&apos;equity&apos;, &apos;retained earnings&apos;, &apos;net income&apos;) then &apos;Equity&apos;&#10;      else null end as ACCOUNT_CATEGORY&#10;  from transactions_in_every_calculation_period_w_exchange_rates&#10;  left join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id&#10;)&#10;&#10;select&#10;  reporting_accounting_periods.accounting_period_id as ACCOUNTING_PERIOD_ID,&#10;  reporting_accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  reporting_accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  reporting_accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(reporting_accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(reporting_accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  accounts.name as ACCOUNT_NAME,&#10;  accounts.type_name as ACCOUNT_TYPE_NAME,&#10;  accounts.account_id as ACCOUNT_ID,&#10;  accounts.accountnumber as ACCOUNT_NUMBER,&#10;  concat(accounts.accountnumber, &apos; - &apos;, accounts.name) as ACCOUNT_NUMBER_AND_NAME,&#10;  classes.full_name as CLASS_FULL_NAME,&#10;  locations.full_name as LOCATION_FULL_NAME,&#10;  departments.full_name as DEPARTMENT_FULL_NAME,&#10;  -converted_amount_using_transaction_accounting_period as CONVERTED_AMOUNT,&#10;  transactions_with_converted_amounts.account_category as ACCOUNT_CATEGORY,&#10;  case when lower(accounts.type_name) = &apos;income&apos; then 1&#10;    when lower(accounts.type_name) = &apos;cost of goods sold&apos; then 2&#10;    when lower(accounts.type_name) = &apos;expense&apos; then 3&#10;    when lower(accounts.type_name) = &apos;other income&apos; then 4&#10;    when lower(accounts.type_name) = &apos;other expense&apos; then 5&#10;    else null&#10;    end as INCOME_STATEMENT_SORT_HELPER&#10;from transactions_with_converted_amounts as transactions_with_converted_amounts&#10;left join netsuite.transaction_lines as transaction_lines&#10;  on transaction_lines.transaction_line_id = transactions_with_converted_amounts.transaction_line_id&#10;  and transaction_lines.transaction_id = transactions_with_converted_amounts.transaction_id&#10;left join netsuite.classes on classes.class_id = transaction_lines.class_id&#10;left join netsuite.locations on locations.location_id = transaction_lines.location_id&#10;left join netsuite.departments on departments.department_id = transaction_lines.department_id&#10;left join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id&#10;left join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;where reporting_accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;  and transactions_with_converted_amounts.is_income_statement</relation>
+        <metadata-records>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_ID</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_ID]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_ID</remote-alias>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_ENDING</remote-name>
+            <remote-type>7</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_ENDING]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_ENDING</remote-alias>
+            <local-type>datetime</local-type>
+            <aggregation>Year</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_FULL_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_FULL_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_FULL_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNTING_PERIOD_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNTING_PERIOD_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNTING_PERIOD_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-name>
+            <remote-type>11</remote-type>
+            <local-name>[IS_ACCOUNTING_PERIOD_ADJUSTMENT]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-alias>
+            <local-type>boolean</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>IS_ACCOUNTING_PERIOD_CLOSED</remote-name>
+            <remote-type>11</remote-type>
+            <local-name>[IS_ACCOUNTING_PERIOD_CLOSED]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>IS_ACCOUNTING_PERIOD_CLOSED</remote-alias>
+            <local-type>boolean</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNT_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_TYPE_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_TYPE_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNT_TYPE_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_ID</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[ACCOUNT_ID]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNT_ID</remote-alias>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_NUMBER</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_NUMBER]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNT_NUMBER</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_NUMBER_AND_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_NUMBER_AND_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNT_NUMBER_AND_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>CLASS_FULL_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[CLASS_FULL_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>CLASS_FULL_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>LOCATION_FULL_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[LOCATION_FULL_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>LOCATION_FULL_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>DEPARTMENT_FULL_NAME</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[DEPARTMENT_FULL_NAME]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>DEPARTMENT_FULL_NAME</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>CONVERTED_AMOUNT</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[CONVERTED_AMOUNT]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>CONVERTED_AMOUNT</remote-alias>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>ACCOUNT_CATEGORY</remote-name>
+            <remote-type>130</remote-type>
+            <local-name>[ACCOUNT_CATEGORY]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>ACCOUNT_CATEGORY</remote-alias>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>INCOME_STATEMENT_SORT_HELPER</remote-name>
+            <remote-type>20</remote-type>
+            <local-name>[INCOME_STATEMENT_SORT_HELPER]</local-name>
+            <parent-name>[income_statement]</parent-name>
+            <remote-alias>INCOME_STATEMENT_SORT_HELPER</remote-alias>
+            <local-type>integer</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+        </metadata-records>
+      </connection>
+      <column aggregation='Sum' datatype='real' name='[ACCOUNTING_PERIOD_ID]' role='dimension' type='ordinal' />
+      <column aggregation='Sum' datatype='real' name='[ACCOUNT_ID]' role='dimension' type='ordinal' />
+      <column aggregation='Sum' datatype='integer' name='[INCOME_STATEMENT_SORT_HELPER]' role='dimension' type='ordinal' />
+      <column datatype='integer' name='[Number of Records]' role='measure' type='quantitative' user:auto-column='numrec'>
+        <calculation class='tableau' formula='1' />
+      </column>
+      <layout dim-ordering='alphabetic' dim-percentage='0.697333' measure-ordering='alphabetic' measure-percentage='0.302667' show-structure='true' />
+      <semantic-values>
+        <semantic-value key='[Country].[Name]' value='&quot;United States&quot;' />
+      </semantic-values>
+    </datasource>
     <datasource caption='Transaction Details' inline='true' name='federated.1536j2w1odgej11h17r3l1ukn6qo' version='18.1'>
       <connection class='federated'>
         <named-connections>
           <named-connection caption='BigQuery' name='bigquery.181gvj71psor1717kro8c0uac886'>
-            <connection CATALOG='private-internal' EXECCATALOG='private-internal' REDIRECT_URI='urn:ietf:wg:oauth:2.0:oob' SCOPE='email profile https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/cloudplatformprojects.readonly' authentication='yes' bq-fetch-rows='' bq-fetch-tasks='' bq-large-fetch-rows='' bq-response-rows='' class='bigquery' connection-dialect='google-sql' project='Private Internal' schema='netsuite' server='' server-oauth='' username='kristin@fivetran.com' />
+            <connection CATALOG='' EXECCATALOG='' REDIRECT_URI='urn:ietf:wg:oauth:2.0:oob' SCOPE='email profile https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/cloudplatformprojects.readonly' authentication='yes' bq-fetch-rows='' bq-fetch-tasks='' bq-large-fetch-rows='' bq-response-rows='' class='bigquery' connection-dialect='google-sql' project='' schema='' server='' server-oauth='' username='' />
           </named-connection>
         </named-connections>
-        <relation connection='bigquery.181gvj71psor1717kro8c0uac886' name='transaction_details' type='text'>with transactions_with_converted_amounts as (&#10;  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */&#10;    select&#10;      consolidated_exchange_rates.accounting_period_id,&#10;      consolidated_exchange_rates.average_rate,&#10;      consolidated_exchange_rates.current_rate,&#10;      consolidated_exchange_rates.historical_rate,&#10;      consolidated_exchange_rates.from_subsidiary_id,&#10;      consolidated_exchange_rates.to_subsidiary_id&#10;    from netsuite.consolidated_exchange_rates&#10;    where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  /* constrait - only the primary subsidiary has no parent */&#10;      and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = &apos;yes&apos; )&#10;      and not consolidated_exchange_rates._fivetran_deleted&#10;  ), accountXperiod_exchange_rate_map as ( /* account table with exchange rate details by accounting period */&#10;    select&#10;      period_exchange_rate_map.accounting_period_id,&#10;      period_exchange_rate_map.from_subsidiary_id,&#10;      period_exchange_rate_map.to_subsidiary_id,&#10;      accounts.account_id,&#10;      case&#10;        when lower(accounts.general_rate_type) = &apos;historical&apos; then period_exchange_rate_map.historical_rate&#10;        when lower(accounts.general_rate_type) = &apos;current&apos; then period_exchange_rate_map.current_rate&#10;        when lower(accounts.general_rate_type) = &apos;average&apos; then period_exchange_rate_map.average_rate&#10;        else null&#10;        end as exchange_rate&#10;    from netsuite.accounts&#10;    cross join period_exchange_rate_map&#10;  ), transaction_lines_w_accounting_period as ( /* transaction line totals, by accounts, accounting period and subsidiary */&#10;    select&#10;      transaction_lines.transaction_id,&#10;      transaction_lines.transaction_line_id,&#10;      transaction_lines.subsidiary_id,&#10;      transaction_lines.account_id,&#10;      transactions.accounting_period_id as transaction_accounting_period_id,&#10;      coalesce(transaction_lines.amount, 0) as unconverted_amount&#10;    from netsuite.transaction_lines&#10;    join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;    where not transactions._fivetran_deleted&#10;      and lower(transactions.transaction_type) != &apos;revenue arrangement&apos;&#10;      and lower(non_posting_line) != &apos;yes&apos;&#10;  ), period_id_list_to_current_period as ( /* period ids with all future period ids.  this is needed to calculate cumulative totals by correct exchange rates. */&#10;    select&#10;      base.accounting_period_id,&#10;      array_agg(multiplier.accounting_period_id order by multiplier.accounting_period_id) as accounting_periods_to_include_for&#10;    from netsuite.accounting_periods as base&#10;    join netsuite.accounting_periods as multiplier&#10;      on multiplier.starting &gt;&gt;= base.starting&#10;      and multiplier.quarter = base.quarter&#10;      and multiplier.year_0 = base.year_0&#10;      and multiplier.fiscal_calendar_id = base.fiscal_calendar_id&#10;      and multiplier.starting &lt;&lt;= current_timestamp()&#10;    where lower(base.quarter) = &apos;no&apos;&#10;      and lower(base.year_0) = &apos;no&apos;&#10;      and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) /* fiscal calendar will align with parent subsidiary&apos;s default calendar */&#10;    group by 1&#10;  ), transactions_in_every_calculation_period as (&#10;    select&#10;      transaction_lines_w_accounting_period.*,&#10;      reporting_accounting_period_id&#10;    from transaction_lines_w_accounting_period,&#10;      unnest((select&#10;                accounting_periods_to_include_for&#10;              from period_id_list_to_current_period&#10;              where period_id_list_to_current_period.accounting_period_id&#10;              = transaction_lines_w_accounting_period.transaction_accounting_period_id)) as reporting_accounting_period_id&#10;  ), transactions_in_every_calculation_period_w_exchange_rates as (&#10;    select&#10;      transactions_in_every_calculation_period.*,&#10;      exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,&#10;      exchange_transaction_period.exchange_rate as exchange_rate_transaction_period&#10;    from transactions_in_every_calculation_period&#10;    join accountXperiod_exchange_rate_map as exchange_reporting_period&#10;      on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id&#10;      and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;    join accountXperiod_exchange_rate_map as exchange_transaction_period&#10;      on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id&#10;      and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;  )&#10;  select&#10;    transactions_in_every_calculation_period_w_exchange_rates.*,&#10;    unconverted_amount * exchange_rate_reporting_period as converted_amount_using_reporting_month,&#10;    unconverted_amount * exchange_rate_transaction_period as converted_amount_using_transaction_accounting_period,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;income&apos;,&apos;other income&apos;,&apos;expense&apos;,&apos;other expense&apos;,&apos;other income&apos;,&apos;cost of goods sold&apos;) then true&#10;      else false&#10;      end as is_income_statement,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;accounts receivable&apos;, &apos;bank&apos;, &apos;deferred expense&apos;, &apos;fixed asset&apos;, &apos;other asset&apos;, &apos;other current asset&apos;, &apos;unbilled receivable&apos;) then &apos;Asset&apos;&#10;      when lower(accounts.type_name) in (&apos;cost of goods sold&apos;, &apos;expense&apos;, &apos;other expense&apos;) then &apos;Expense&apos;&#10;      when lower(accounts.type_name) in (&apos;income&apos;, &apos;other income&apos;) then &apos;Income&apos;&#10;      when lower(accounts.type_name) in (&apos;accounts payable&apos;, &apos;credit card&apos;, &apos;deferred revenue&apos;, &apos;long term liability&apos;, &apos;other current liability&apos;) then &apos;Liability&apos;&#10;      when lower(accounts.type_name) in (&apos;equity&apos;, &apos;retained earnings&apos;, &apos;net income&apos;) then &apos;Equity&apos;&#10;      else null end as account_category&#10;  from transactions_in_every_calculation_period_w_exchange_rates&#10;  join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id&#10;)&#10;select&#10;  transaction_lines.TRANSACTION_LINE_ID,&#10;  transaction_lines.memo as TRANSACTION_MEMO,&#10;  lower(transaction_lines.non_posting_line) = &apos;yes&apos; as IS_TRANSACTION_NON_POSTING,&#10;  transactions.TRANSACTION_ID,&#10;  transactions.status as TRANSACTION_STATUS,&#10;  transactions.trandate as TRANSACTION_DATE,&#10;  transactions.due_date as TRANSACTION_DUE_DATE,&#10;  transactions.transaction_type as TRANSACTION_TYPE,&#10;  (lower(transactions.is_advanced_intercompany) = &apos;yes&apos; or lower(transactions.is_intercompany) = &apos;yes&apos;) as IS_TRANSACTION_INTERCOMPANY,&#10;  accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  accounts.name as ACCOUNT_NAME,&#10;  accounts.type_name as ACCOUNT_TYPE_NAME,&#10;  accounts.account_id as ACCOUNT_ID,&#10;  accounts.accountnumber as ACCOUNT_NUMBER,&#10;  lower(accounts.is_leftside) = &apos;t&apos; as IS_ACCOUNT_LEFTSIDE,&#10;  lower(accounts.type_name) like &apos;accounts payable%&apos; as IS_ACCOUNTS_PAYABLE,&#10;  lower(accounts.type_name) like &apos;accounts receivable%&apos; as IS_ACCOUNTS_RECEIVABLE,&#10;  lower(accounts.name) like &apos;%intercompany%&apos; as IS_ACCOUNT_INTERCOMPANY,&#10;  coalesce(parent_account.name, accounts.name) as PARENT_ACCOUNT_NAME,&#10;  income_accounts.income_account_id is not null as IS_INCOME_ACCOUNT,&#10;  expense_accounts.expense_account_id is not null as IS_EXPENSE_ACCOUNT,&#10;  customers.companyname as CUSTOMER_COMPANY_NAME,&#10;  customers.city as CUSTOMER_CITY,&#10;  customers.state as CUSTOMER_STATE,&#10;  customers.zipcode as CUSTOMER_ZIPCODE,&#10;  customers.country as CUSTOMER_COUNTRY,&#10;  customers.date_first_order as CUSTOMER_DATE_FIRST_ORDER,&#10;  items.name as ITEM_NAME,&#10;  items.type_name as ITEM_TYPE_NAME,&#10;  items.salesdescription as ITEM_SALES_DESCRIPTION,&#10;  locations.name as LOCATION_NAME,&#10;  locations.city as LOCATION_CITY,&#10;  locations.country as LOCATION_COUNTRY,&#10;  vendor_types.name as VENDOR_TYPE_NAME,&#10;  vendors.companyname as VENDOR_NAME,&#10;  vendors.create_date as VENDOR_CREATE_DATE,&#10;  currencies.name as CURRENCY_NAME,&#10;  currencies.symbol as CURRENCY_SYMBOL,&#10;  departments.name as DEPARTMENT_NAME,&#10;  subsidiaries.name as SUBSIDIARY_NAME,&#10;  case&#10;    when lower(accounts.type_name) = &apos;income&apos; or lower(accounts.type_name) = &apos;other income&apos; then -converted_amount_using_transaction_accounting_period&#10;    else converted_amount_using_transaction_accounting_period&#10;    end as CONVERTED_AMOUNT,&#10;  case&#10;    when lower(accounts.type_name) = &apos;income&apos; or lower(accounts.type_name) = &apos;other income&apos; then -transaction_lines.amount&#10;    else transaction_lines.amount&#10;    end as TRANSACTION_AMOUNT,&#10;  case&#10;    when date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 0 then &apos;&lt;&lt; 0.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 0 and date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 30 then &apos;&gt;&gt;= 0.0 and &lt;&lt; 30.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 30 and date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 60 then &apos;&gt;&gt;= 30.0 and &lt;&lt; 60.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 60 and date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 90 then &apos;&gt;&gt;= 60.0 and &lt;&lt; 90.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 90 then &apos;&gt;&gt;= 90.0&apos;&#10;    else &apos;Undefined&apos;&#10;    end as DAYS_PAST_DUE_DATE_TIER&#10;from netsuite.transaction_lines&#10;join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;  and not transactions._fivetran_deleted&#10;left join transactions_with_converted_amounts as transactions_with_converted_amounts&#10;  on transactions_with_converted_amounts.transaction_line_id = transaction_lines.transaction_line_id&#10;  and transactions_with_converted_amounts.transaction_id = transaction_lines.transaction_id&#10;  and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;left join netsuite.accounts on accounts.account_id = transaction_lines.account_id&#10;left join netsuite.accounts as parent_account on parent_account.account_id = accounts.parent_id&#10;left join netsuite.accounting_periods on accounting_periods.accounting_period_id = transactions.accounting_period_id&#10;left join netsuite.income_accounts on income_accounts.income_account_id = accounts.account_id&#10;left join netsuite.expense_accounts on expense_accounts.expense_account_id = accounts.account_id&#10;left join netsuite.companies on companies.company_id = transaction_lines.company_id&#10;  and not companies._fivetran_deleted&#10;left join netsuite.vendors on vendors.vendor_id = companies.company_id&#10;  and not vendors._fivetran_deleted&#10;left join netsuite.vendor_types on vendor_types.vendor_type_id = vendors.vendor_type_id&#10;  and not vendor_types._fivetran_deleted&#10;left join netsuite.customers on customers.customer_id = companies.company_id&#10;  and not customers._fivetran_deleted&#10;left join netsuite.partners on partners.partner_id = companies.company_id&#10;  and not partners._fivetran_deleted&#10;left join netsuite.items on items.item_id = transaction_lines.item_id&#10;  and not items._fivetran_deleted&#10;left join netsuite.locations on locations.location_id = transaction_lines.location_id&#10;left join netsuite.currencies on currencies.currency_id = transactions.currency_id&#10;  and not currencies._fivetran_deleted&#10;left join netsuite.departments on departments.department_id = transaction_lines.department_id&#10;join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id&#10;where (accounting_periods.fiscal_calendar_id is null&#10;  or accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null))</relation>
+        <relation connection='bigquery.181gvj71psor1717kro8c0uac886' name='transaction_details' type='text'>with transactions_with_converted_amounts as (&#10;  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */&#10;    select&#10;      consolidated_exchange_rates.accounting_period_id,&#10;      consolidated_exchange_rates.average_rate,&#10;      consolidated_exchange_rates.current_rate,&#10;      consolidated_exchange_rates.historical_rate,&#10;      consolidated_exchange_rates.from_subsidiary_id,&#10;      consolidated_exchange_rates.to_subsidiary_id&#10;    from netsuite.consolidated_exchange_rates&#10;    where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  /* constrait - only the primary subsidiary has no parent */&#10;      and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = &apos;yes&apos; )&#10;      and not consolidated_exchange_rates._fivetran_deleted&#10;  ), accountXperiod_exchange_rate_map as ( /* account table with exchange rate details by accounting period */&#10;    select&#10;      period_exchange_rate_map.accounting_period_id,&#10;      period_exchange_rate_map.from_subsidiary_id,&#10;      period_exchange_rate_map.to_subsidiary_id,&#10;      accounts.account_id,&#10;      case&#10;        when lower(accounts.general_rate_type) = &apos;historical&apos; then period_exchange_rate_map.historical_rate&#10;        when lower(accounts.general_rate_type) = &apos;current&apos; then period_exchange_rate_map.current_rate&#10;        when lower(accounts.general_rate_type) = &apos;average&apos; then period_exchange_rate_map.average_rate&#10;        else null&#10;        end as exchange_rate&#10;    from netsuite.accounts&#10;    cross join period_exchange_rate_map&#10;  ), transaction_lines_w_accounting_period as ( /* transaction line totals, by accounts, accounting period and subsidiary */&#10;    select&#10;      transaction_lines.transaction_id,&#10;      transaction_lines.transaction_line_id,&#10;      transaction_lines.subsidiary_id,&#10;      transaction_lines.account_id,&#10;      transactions.accounting_period_id as transaction_accounting_period_id,&#10;      coalesce(transaction_lines.amount, 0) as unconverted_amount&#10;    from netsuite.transaction_lines&#10;    join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;    where not transactions._fivetran_deleted&#10;      and lower(transactions.transaction_type) != &apos;revenue arrangement&apos;&#10;      and lower(non_posting_line) != &apos;yes&apos;&#10;  ), period_id_list_to_current_period as ( /* period ids with all future period ids.  this is needed to calculate cumulative totals by correct exchange rates. */&#10;    select&#10;      base.accounting_period_id,&#10;      array_agg(multiplier.accounting_period_id order by multiplier.accounting_period_id) as accounting_periods_to_include_for&#10;    from netsuite.accounting_periods as base&#10;    join netsuite.accounting_periods as multiplier&#10;      on multiplier.starting &gt;&gt;= base.starting&#10;      and multiplier.quarter = base.quarter&#10;      and multiplier.year_0 = base.year_0&#10;      and multiplier.fiscal_calendar_id = base.fiscal_calendar_id&#10;      and multiplier.starting &lt;&lt;= current_timestamp()&#10;    where lower(base.quarter) = &apos;no&apos;&#10;      and lower(base.year_0) = &apos;no&apos;&#10;      and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) /* fiscal calendar will align with parent subsidiary&apos;s default calendar */&#10;    group by 1&#10;  ), transactions_in_every_calculation_period as (&#10;    select&#10;      transaction_lines_w_accounting_period.*,&#10;      reporting_accounting_period_id&#10;    from transaction_lines_w_accounting_period,&#10;      unnest((select&#10;                accounting_periods_to_include_for&#10;              from period_id_list_to_current_period&#10;              where period_id_list_to_current_period.accounting_period_id&#10;              = transaction_lines_w_accounting_period.transaction_accounting_period_id)) as reporting_accounting_period_id&#10;  ), transactions_in_every_calculation_period_w_exchange_rates as (&#10;    select&#10;      transactions_in_every_calculation_period.*,&#10;      exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,&#10;      exchange_transaction_period.exchange_rate as exchange_rate_transaction_period&#10;    from transactions_in_every_calculation_period&#10;    left join accountXperiod_exchange_rate_map as exchange_reporting_period&#10;      on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id&#10;      and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;    left join accountXperiod_exchange_rate_map as exchange_transaction_period&#10;      on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id&#10;      and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;  )&#10;  select&#10;    transactions_in_every_calculation_period_w_exchange_rates.*,&#10;    unconverted_amount * exchange_rate_reporting_period as converted_amount_using_reporting_month,&#10;    unconverted_amount * exchange_rate_transaction_period as converted_amount_using_transaction_accounting_period,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;income&apos;,&apos;other income&apos;,&apos;expense&apos;,&apos;other expense&apos;,&apos;other income&apos;,&apos;cost of goods sold&apos;) then true&#10;      else false&#10;      end as is_income_statement,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;accounts receivable&apos;, &apos;bank&apos;, &apos;deferred expense&apos;, &apos;fixed asset&apos;, &apos;other asset&apos;, &apos;other current asset&apos;, &apos;unbilled receivable&apos;) then &apos;Asset&apos;&#10;      when lower(accounts.type_name) in (&apos;cost of goods sold&apos;, &apos;expense&apos;, &apos;other expense&apos;) then &apos;Expense&apos;&#10;      when lower(accounts.type_name) in (&apos;income&apos;, &apos;other income&apos;) then &apos;Income&apos;&#10;      when lower(accounts.type_name) in (&apos;accounts payable&apos;, &apos;credit card&apos;, &apos;deferred revenue&apos;, &apos;long term liability&apos;, &apos;other current liability&apos;) then &apos;Liability&apos;&#10;      when lower(accounts.type_name) in (&apos;equity&apos;, &apos;retained earnings&apos;, &apos;net income&apos;) then &apos;Equity&apos;&#10;      else null end as account_category&#10;  from transactions_in_every_calculation_period_w_exchange_rates&#10;  left join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id&#10;)&#10;select&#10;  transaction_lines.TRANSACTION_LINE_ID,&#10;  transaction_lines.memo as TRANSACTION_MEMO,&#10;  lower(transaction_lines.non_posting_line) = &apos;yes&apos; as IS_TRANSACTION_NON_POSTING,&#10;  transactions.TRANSACTION_ID,&#10;  transactions.status as TRANSACTION_STATUS,&#10;  transactions.trandate as TRANSACTION_DATE,&#10;  transactions.due_date as TRANSACTION_DUE_DATE,&#10;  transactions.transaction_type as TRANSACTION_TYPE,&#10;  (lower(transactions.is_advanced_intercompany) = &apos;yes&apos; or lower(transactions.is_intercompany) = &apos;yes&apos;) as IS_TRANSACTION_INTERCOMPANY,&#10;  accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  accounts.name as ACCOUNT_NAME,&#10;  accounts.type_name as ACCOUNT_TYPE_NAME,&#10;  accounts.account_id as ACCOUNT_ID,&#10;  accounts.accountnumber as ACCOUNT_NUMBER,&#10;  lower(accounts.is_leftside) = &apos;t&apos; as IS_ACCOUNT_LEFTSIDE,&#10;  lower(accounts.type_name) like &apos;accounts payable%&apos; as IS_ACCOUNTS_PAYABLE,&#10;  lower(accounts.type_name) like &apos;accounts receivable%&apos; as IS_ACCOUNTS_RECEIVABLE,&#10;  lower(accounts.name) like &apos;%intercompany%&apos; as IS_ACCOUNT_INTERCOMPANY,&#10;  coalesce(parent_account.name, accounts.name) as PARENT_ACCOUNT_NAME,&#10;  income_accounts.income_account_id is not null as IS_INCOME_ACCOUNT,&#10;  expense_accounts.expense_account_id is not null as IS_EXPENSE_ACCOUNT,&#10;  customers.companyname as CUSTOMER_COMPANY_NAME,&#10;  customers.city as CUSTOMER_CITY,&#10;  customers.state as CUSTOMER_STATE,&#10;  customers.zipcode as CUSTOMER_ZIPCODE,&#10;  customers.country as CUSTOMER_COUNTRY,&#10;  customers.date_first_order as CUSTOMER_DATE_FIRST_ORDER,&#10;  items.name as ITEM_NAME,&#10;  items.type_name as ITEM_TYPE_NAME,&#10;  items.salesdescription as ITEM_SALES_DESCRIPTION,&#10;  locations.name as LOCATION_NAME,&#10;  locations.city as LOCATION_CITY,&#10;  locations.country as LOCATION_COUNTRY,&#10;  vendor_types.name as VENDOR_TYPE_NAME,&#10;  vendors.companyname as VENDOR_NAME,&#10;  vendors.create_date as VENDOR_CREATE_DATE,&#10;  currencies.name as CURRENCY_NAME,&#10;  currencies.symbol as CURRENCY_SYMBOL,&#10;  departments.name as DEPARTMENT_NAME,&#10;  subsidiaries.name as SUBSIDIARY_NAME,&#10;  case&#10;    when lower(accounts.type_name) = &apos;income&apos; or lower(accounts.type_name) = &apos;other income&apos; then -converted_amount_using_transaction_accounting_period&#10;    else converted_amount_using_transaction_accounting_period&#10;    end as CONVERTED_AMOUNT,&#10;  case&#10;    when lower(accounts.type_name) = &apos;income&apos; or lower(accounts.type_name) = &apos;other income&apos; then -transaction_lines.amount&#10;    else transaction_lines.amount&#10;    end as TRANSACTION_AMOUNT,&#10;  case&#10;    when date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 0 then &apos;&lt;&lt; 0.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 0 and date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 30 then &apos;&gt;&gt;= 0.0 and &lt;&lt; 30.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 30 and date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 60 then &apos;&gt;&gt;= 30.0 and &lt;&lt; 60.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 60 and date_diff(current_date, date(transactions.due_date), day)  &lt;&lt; 90 then &apos;&gt;&gt;= 60.0 and &lt;&lt; 90.0&apos;&#10;    when date_diff(current_date, date(transactions.due_date), day)  &gt;&gt;= 90 then &apos;&gt;&gt;= 90.0&apos;&#10;    else &apos;Undefined&apos;&#10;    end as DAYS_PAST_DUE_DATE_TIER&#10;from netsuite.transaction_lines&#10;join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;  and not transactions._fivetran_deleted&#10;left join transactions_with_converted_amounts as transactions_with_converted_amounts&#10;  on transactions_with_converted_amounts.transaction_line_id = transaction_lines.transaction_line_id&#10;  and transactions_with_converted_amounts.transaction_id = transaction_lines.transaction_id&#10;  and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;left join netsuite.accounts on accounts.account_id = transaction_lines.account_id&#10;left join netsuite.accounts as parent_account on parent_account.account_id = accounts.parent_id&#10;left join netsuite.accounting_periods on accounting_periods.accounting_period_id = transactions.accounting_period_id&#10;left join netsuite.income_accounts on income_accounts.income_account_id = accounts.account_id&#10;left join netsuite.expense_accounts on expense_accounts.expense_account_id = accounts.account_id&#10;left join netsuite.companies on companies.company_id = transaction_lines.company_id&#10;  and not companies._fivetran_deleted&#10;left join netsuite.vendors on vendors.vendor_id = companies.company_id&#10;  and not vendors._fivetran_deleted&#10;left join netsuite.vendor_types on vendor_types.vendor_type_id = vendors.vendor_type_id&#10;  and not vendor_types._fivetran_deleted&#10;left join netsuite.customers on customers.customer_id = companies.company_id&#10;  and not customers._fivetran_deleted&#10;left join netsuite.partners on partners.partner_id = companies.company_id&#10;  and not partners._fivetran_deleted&#10;left join netsuite.items on items.item_id = transaction_lines.item_id&#10;  and not items._fivetran_deleted&#10;left join netsuite.locations on locations.location_id = transaction_lines.location_id&#10;left join netsuite.currencies on currencies.currency_id = transactions.currency_id&#10;  and not currencies._fivetran_deleted&#10;left join netsuite.departments on departments.department_id = transaction_lines.department_id&#10;left join netsuite.subsidiaries on subsidiaries.subsidiary_id = transaction_lines.subsidiary_id&#10;where (accounting_periods.fiscal_calendar_id is null&#10;  or accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null))</relation>
         <metadata-records>
           <metadata-record class='column'>
             <remote-name>TRANSACTION_LINE_ID</remote-name>
@@ -519,7 +877,7 @@
           <groupfilter function='level-members' level='[ACCOUNT_CATEGORY]' />
         </groupfilter>
       </group>
-      <layout dim-ordering='alphabetic' dim-percentage='0.848485' measure-ordering='alphabetic' measure-percentage='0.151515' show-structure='true' user-set-layout='true' />
+      <layout dim-ordering='alphabetic' dim-percentage='0.848' measure-ordering='alphabetic' measure-percentage='0.152' show-structure='true' user-set-layout='true' />
       <style>
         <style-rule element='mark'>
           <encoding attr='color' field='[none:CUSTOMER_STATE:nk]' type='palette'>
@@ -747,364 +1105,6 @@
       <semantic-values>
         <semantic-value key='[Country].[Name]' value='&quot;United States&quot;' />
       </semantic-values>
-    </datasource>
-    <datasource caption='Income Statement' inline='true' name='federated.1y90zz21qenhz81frqyhy06hh5op' version='18.1'>
-      <connection class='federated'>
-        <named-connections>
-          <named-connection caption='BigQuery' name='bigquery.1x71co002l14131el859u1310vby'>
-            <connection CATALOG='private-internal' EXECCATALOG='private-internal' REDIRECT_URI='urn:ietf:wg:oauth:2.0:oob' SCOPE='email profile https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/cloudplatformprojects.readonly' authentication='yes' bq-fetch-rows='' bq-fetch-tasks='' bq-large-fetch-rows='' bq-response-rows='' class='bigquery' connection-dialect='google-sql' project='Private Internal' schema='netsuite' server='' server-oauth='' username='kristin@fivetran.com' />
-          </named-connection>
-        </named-connections>
-        <relation connection='bigquery.1x71co002l14131el859u1310vby' name='income_statement' type='text'>with transactions_with_converted_amounts as (&#10;  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */&#10;    select&#10;      consolidated_exchange_rates.accounting_period_id,&#10;      consolidated_exchange_rates.average_rate,&#10;      consolidated_exchange_rates.current_rate,&#10;      consolidated_exchange_rates.historical_rate,&#10;      consolidated_exchange_rates.from_subsidiary_id,&#10;      consolidated_exchange_rates.to_subsidiary_id&#10;    from netsuite.consolidated_exchange_rates&#10;    where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  /* constrait - only the primary subsidiary has no parent */&#10;      and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = &apos;yes&apos; )&#10;      and not consolidated_exchange_rates._fivetran_deleted&#10;  ), accountXperiod_exchange_rate_map as ( /* account table with exchange rate details by accounting period */&#10;    select&#10;      period_exchange_rate_map.accounting_period_id,&#10;      period_exchange_rate_map.from_subsidiary_id,&#10;      period_exchange_rate_map.to_subsidiary_id,&#10;      accounts.account_id,&#10;      case&#10;        when lower(accounts.general_rate_type) = &apos;historical&apos; then period_exchange_rate_map.historical_rate&#10;        when lower(accounts.general_rate_type) = &apos;current&apos; then period_exchange_rate_map.current_rate&#10;        when lower(accounts.general_rate_type) = &apos;average&apos; then period_exchange_rate_map.average_rate&#10;        else null&#10;        end as exchange_rate&#10;    from netsuite.accounts&#10;    cross join period_exchange_rate_map&#10;  ), transaction_lines_w_accounting_period as ( /* transaction line totals, by accounts, accounting period and subsidiary */&#10;    select&#10;      transaction_lines.transaction_id,&#10;      transaction_lines.transaction_line_id,&#10;      transaction_lines.subsidiary_id,&#10;      transaction_lines.account_id,&#10;      transactions.accounting_period_id as transaction_accounting_period_id,&#10;      coalesce(transaction_lines.amount, 0) as unconverted_amount&#10;    from netsuite.transaction_lines&#10;    join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;    where not transactions._fivetran_deleted&#10;      and lower(transactions.transaction_type) != &apos;revenue arrangement&apos;&#10;      and lower(non_posting_line) != &apos;yes&apos;&#10;  ), period_id_list_to_current_period as ( /* period ids with all future period ids.  this is needed to calculate cumulative totals by correct exchange rates. */&#10;    select&#10;      base.accounting_period_id,&#10;      array_agg(multiplier.accounting_period_id order by multiplier.accounting_period_id) as accounting_periods_to_include_for&#10;    from netsuite.accounting_periods as base&#10;    join netsuite.accounting_periods as multiplier&#10;      on multiplier.starting &gt;&gt;= base.starting&#10;      and multiplier.quarter = base.quarter&#10;      and multiplier.year_0 = base.year_0&#10;      and multiplier.fiscal_calendar_id = base.fiscal_calendar_id&#10;      and multiplier.starting &lt;&lt;= current_timestamp()&#10;    where lower(base.quarter) = &apos;no&apos;&#10;      and lower(base.year_0) = &apos;no&apos;&#10;      and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) /* fiscal calendar will align with parent subsidiary&apos;s default calendar */&#10;    group by 1&#10;  ), transactions_in_every_calculation_period as (&#10;    select&#10;      transaction_lines_w_accounting_period.*,&#10;      reporting_accounting_period_id&#10;    from transaction_lines_w_accounting_period,&#10;      unnest((select&#10;                accounting_periods_to_include_for&#10;              from period_id_list_to_current_period&#10;              where period_id_list_to_current_period.accounting_period_id&#10;              = transaction_lines_w_accounting_period.transaction_accounting_period_id)) as reporting_accounting_period_id&#10;  ), transactions_in_every_calculation_period_w_exchange_rates as (&#10;    select&#10;      transactions_in_every_calculation_period.*,&#10;      exchange_reporting_period.exchange_rate as EXCHANGE_RATE_REPORTING_PERIOD,&#10;      exchange_transaction_period.exchange_rate as EXCHANGE_RATE_TRANSACTION_PERIOD&#10;    from transactions_in_every_calculation_period&#10;    join accountXperiod_exchange_rate_map as exchange_reporting_period&#10;      on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id&#10;      and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;    join accountXperiod_exchange_rate_map as exchange_transaction_period&#10;      on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id&#10;      and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;  )&#10;  select&#10;    transactions_in_every_calculation_period_w_exchange_rates.*,&#10;    unconverted_amount * exchange_rate_reporting_period as CONVERTED_AMOUNT_USING_REPORTING_MONTH,&#10;    unconverted_amount * exchange_rate_transaction_period as CONVERTED_AMOUNT_USING_TRANSACTION_ACCOUNTING_PERIOD,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;income&apos;,&apos;other income&apos;,&apos;expense&apos;,&apos;other expense&apos;,&apos;other income&apos;,&apos;cost of goods sold&apos;) then true&#10;      else false&#10;      end as IS_INCOME_STATEMENT,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;accounts receivable&apos;, &apos;bank&apos;, &apos;deferred expense&apos;, &apos;fixed asset&apos;, &apos;other asset&apos;, &apos;other current asset&apos;, &apos;unbilled receivable&apos;) then &apos;Asset&apos;&#10;      when lower(accounts.type_name) in (&apos;cost of goods sold&apos;, &apos;expense&apos;, &apos;other expense&apos;) then &apos;Expense&apos;&#10;      when lower(accounts.type_name) in (&apos;income&apos;, &apos;other income&apos;) then &apos;Income&apos;&#10;      when lower(accounts.type_name) in (&apos;accounts payable&apos;, &apos;credit card&apos;, &apos;deferred revenue&apos;, &apos;long term liability&apos;, &apos;other current liability&apos;) then &apos;Liability&apos;&#10;      when lower(accounts.type_name) in (&apos;equity&apos;, &apos;retained earnings&apos;, &apos;net income&apos;) then &apos;Equity&apos;&#10;      else null end as ACCOUNT_CATEGORY&#10;  from transactions_in_every_calculation_period_w_exchange_rates&#10;  join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id&#10;)&#10;&#10;select&#10;  reporting_accounting_periods.accounting_period_id as ACCOUNTING_PERIOD_ID,&#10;  reporting_accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  reporting_accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  reporting_accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(reporting_accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(reporting_accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  accounts.name as ACCOUNT_NAME,&#10;  accounts.type_name as ACCOUNT_TYPE_NAME,&#10;  accounts.account_id as ACCOUNT_ID,&#10;  accounts.accountnumber as ACCOUNT_NUMBER,&#10;  concat(accounts.accountnumber, &apos; - &apos;, accounts.name) as ACCOUNT_NUMBER_AND_NAME,&#10;  classes.full_name as CLASS_FULL_NAME,&#10;  locations.full_name as LOCATION_FULL_NAME,&#10;  departments.full_name as DEPARTMENT_FULL_NAME,&#10;  -converted_amount_using_transaction_accounting_period as CONVERTED_AMOUNT,&#10;  transactions_with_converted_amounts.account_category as ACCOUNT_CATEGORY,&#10;  case when lower(accounts.type_name) = &apos;income&apos; then 1&#10;    when lower(accounts.type_name) = &apos;cost of goods sold&apos; then 2&#10;    when lower(accounts.type_name) = &apos;expense&apos; then 3&#10;    when lower(accounts.type_name) = &apos;other income&apos; then 4&#10;    when lower(accounts.type_name) = &apos;other expense&apos; then 5&#10;    else null&#10;    end as INCOME_STATEMENT_SORT_HELPER&#10;from transactions_with_converted_amounts as transactions_with_converted_amounts&#10;join netsuite.transaction_lines as transaction_lines&#10;  on transaction_lines.transaction_line_id = transactions_with_converted_amounts.transaction_line_id&#10;  and transaction_lines.transaction_id = transactions_with_converted_amounts.transaction_id&#10;left join netsuite.classes on classes.class_id = transaction_lines.class_id&#10;left join netsuite.locations on locations.location_id = transaction_lines.location_id&#10;left join netsuite.departments on departments.department_id = transaction_lines.department_id&#10;join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id&#10;join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;where reporting_accounting_periods.fiscal_calendar_id  = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and transactions_with_converted_amounts.transaction_accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;  and transactions_with_converted_amounts.is_income_statement</relation>
-        <metadata-records>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_ID</remote-name>
-            <remote-type>5</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_ID]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_ID</remote-alias>
-            <local-type>real</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_ENDING</remote-name>
-            <remote-type>7</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_ENDING]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_ENDING</remote-alias>
-            <local-type>datetime</local-type>
-            <aggregation>Year</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_FULL_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_FULL_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_FULL_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-name>
-            <remote-type>11</remote-type>
-            <local-name>[IS_ACCOUNTING_PERIOD_ADJUSTMENT]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-alias>
-            <local-type>boolean</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>IS_ACCOUNTING_PERIOD_CLOSED</remote-name>
-            <remote-type>11</remote-type>
-            <local-name>[IS_ACCOUNTING_PERIOD_CLOSED]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>IS_ACCOUNTING_PERIOD_CLOSED</remote-alias>
-            <local-type>boolean</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNT_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_TYPE_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_TYPE_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNT_TYPE_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_ID</remote-name>
-            <remote-type>5</remote-type>
-            <local-name>[ACCOUNT_ID]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNT_ID</remote-alias>
-            <local-type>real</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_NUMBER</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_NUMBER]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNT_NUMBER</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_NUMBER_AND_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_NUMBER_AND_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNT_NUMBER_AND_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>CLASS_FULL_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[CLASS_FULL_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>CLASS_FULL_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>LOCATION_FULL_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[LOCATION_FULL_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>LOCATION_FULL_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>DEPARTMENT_FULL_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[DEPARTMENT_FULL_NAME]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>DEPARTMENT_FULL_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>CONVERTED_AMOUNT</remote-name>
-            <remote-type>5</remote-type>
-            <local-name>[CONVERTED_AMOUNT]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>CONVERTED_AMOUNT</remote-alias>
-            <local-type>real</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_CATEGORY</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_CATEGORY]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>ACCOUNT_CATEGORY</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>INCOME_STATEMENT_SORT_HELPER</remote-name>
-            <remote-type>20</remote-type>
-            <local-name>[INCOME_STATEMENT_SORT_HELPER]</local-name>
-            <parent-name>[income_statement]</parent-name>
-            <remote-alias>INCOME_STATEMENT_SORT_HELPER</remote-alias>
-            <local-type>integer</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-        </metadata-records>
-      </connection>
-      <column aggregation='Sum' datatype='real' name='[ACCOUNTING_PERIOD_ID]' role='dimension' type='ordinal' />
-      <column aggregation='Sum' datatype='real' name='[ACCOUNT_ID]' role='dimension' type='ordinal' />
-      <column aggregation='Sum' datatype='integer' name='[INCOME_STATEMENT_SORT_HELPER]' role='dimension' type='ordinal' />
-      <column datatype='integer' name='[Number of Records]' role='measure' type='quantitative' user:auto-column='numrec'>
-        <calculation class='tableau' formula='1' />
-      </column>
-      <layout dim-ordering='alphabetic' dim-percentage='0.694335' measure-ordering='alphabetic' measure-percentage='0.305665' show-structure='true' />
-      <semantic-values>
-        <semantic-value key='[Country].[Name]' value='&quot;United States&quot;' />
-      </semantic-values>
-    </datasource>
-    <datasource caption='Balance Sheet' inline='true' name='federated.0ggpjke1y9yu8m1dosxmx1k711l5' version='18.1'>
-      <connection class='federated'>
-        <named-connections>
-          <named-connection caption='BigQuery' name='bigquery.11r6qsl193c1gv15qqnk51fdtkpa'>
-            <connection CATALOG='private-internal' EXECCATALOG='private-internal' REDIRECT_URI='urn:ietf:wg:oauth:2.0:oob' SCOPE='email profile https://www.googleapis.com/auth/bigquery https://www.googleapis.com/auth/cloudplatformprojects.readonly' authentication='yes' bq-fetch-rows='' bq-fetch-tasks='' bq-large-fetch-rows='' bq-response-rows='' class='bigquery' connection-dialect='google-sql' project='Private Internal' schema='netsuite' server='' server-oauth='' username='kristin@fivetran.com' />
-          </named-connection>
-        </named-connections>
-        <relation connection='bigquery.11r6qsl193c1gv15qqnk51fdtkpa' name='balance_sheet' type='text'>with transactions_with_converted_amounts as (&#10;  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */&#10;    select&#10;      consolidated_exchange_rates.accounting_period_id,&#10;      consolidated_exchange_rates.average_rate,&#10;      consolidated_exchange_rates.current_rate,&#10;      consolidated_exchange_rates.historical_rate,&#10;      consolidated_exchange_rates.from_subsidiary_id,&#10;      consolidated_exchange_rates.to_subsidiary_id&#10;    from netsuite.consolidated_exchange_rates&#10;    where consolidated_exchange_rates.to_subsidiary_id in (select subsidiary_id from netsuite.subsidiaries where parent_id is null)  /* constrait - only the primary subsidiary has no parent */&#10;      and consolidated_exchange_rates.accounting_book_id in (select accounting_book_id from netsuite.accounting_books where lower(is_primary) = &apos;yes&apos; )&#10;      and not consolidated_exchange_rates._fivetran_deleted&#10;  ), accountXperiod_exchange_rate_map as ( /* account table with exchange rate details by accounting period */&#10;    select&#10;      period_exchange_rate_map.accounting_period_id,&#10;      period_exchange_rate_map.from_subsidiary_id,&#10;      period_exchange_rate_map.to_subsidiary_id,&#10;      accounts.account_id,&#10;      case&#10;        when lower(accounts.general_rate_type) = &apos;historical&apos; then period_exchange_rate_map.historical_rate&#10;        when lower(accounts.general_rate_type) = &apos;current&apos; then period_exchange_rate_map.current_rate&#10;        when lower(accounts.general_rate_type) = &apos;average&apos; then period_exchange_rate_map.average_rate&#10;        else null&#10;        end as exchange_rate&#10;    from netsuite.accounts&#10;    cross join period_exchange_rate_map&#10;  ), transaction_lines_w_accounting_period as ( /* transaction line totals, by accounts, accounting period and subsidiary */&#10;    select&#10;      transaction_lines.transaction_id,&#10;      transaction_lines.transaction_line_id,&#10;      transaction_lines.subsidiary_id,&#10;      transaction_lines.account_id,&#10;      transactions.accounting_period_id as transaction_accounting_period_id,&#10;      coalesce(transaction_lines.amount, 0) as unconverted_amount&#10;    from netsuite.transaction_lines&#10;    join netsuite.transactions on transactions.transaction_id = transaction_lines.transaction_id&#10;    where not transactions._fivetran_deleted&#10;      and lower(transactions.transaction_type) != &apos;revenue arrangement&apos;&#10;      and lower(non_posting_line) != &apos;yes&apos;&#10;  ), period_id_list_to_current_period as ( /* period ids with all future period ids.  this is needed to calculate cumulative totals by correct exchange rates. */&#10;    select&#10;      base.accounting_period_id,&#10;      array_agg(multiplier.accounting_period_id order by multiplier.accounting_period_id) as accounting_periods_to_include_for&#10;    from netsuite.accounting_periods as base&#10;    join netsuite.accounting_periods as multiplier&#10;      on multiplier.starting &gt;&gt;= base.starting&#10;      and multiplier.quarter = base.quarter&#10;      and multiplier.year_0 = base.year_0&#10;      and multiplier.fiscal_calendar_id = base.fiscal_calendar_id&#10;      and multiplier.starting &lt;&lt;= current_timestamp()&#10;    where lower(base.quarter) = &apos;no&apos;&#10;      and lower(base.year_0) = &apos;no&apos;&#10;      and base.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null) /* fiscal calendar will align with parent subsidiary&apos;s default calendar */&#10;    group by 1&#10;  ), transactions_in_every_calculation_period as (&#10;    select&#10;      transaction_lines_w_accounting_period.*,&#10;      reporting_accounting_period_id&#10;    from transaction_lines_w_accounting_period,&#10;      unnest((select&#10;                accounting_periods_to_include_for&#10;              from period_id_list_to_current_period&#10;              where period_id_list_to_current_period.accounting_period_id&#10;              = transaction_lines_w_accounting_period.transaction_accounting_period_id)) as reporting_accounting_period_id&#10;  ), transactions_in_every_calculation_period_w_exchange_rates as (&#10;    select&#10;      transactions_in_every_calculation_period.*,&#10;      exchange_reporting_period.exchange_rate as exchange_rate_reporting_period,&#10;      exchange_transaction_period.exchange_rate as exchange_rate_transaction_period&#10;    from transactions_in_every_calculation_period&#10;    join accountXperiod_exchange_rate_map as exchange_reporting_period&#10;      on exchange_reporting_period.accounting_period_id = transactions_in_every_calculation_period.reporting_accounting_period_id&#10;      and exchange_reporting_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_reporting_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;    join accountXperiod_exchange_rate_map as exchange_transaction_period&#10;      on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id&#10;      and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id&#10;      and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id&#10;  )&#10;  select&#10;    transactions_in_every_calculation_period_w_exchange_rates.*,&#10;    unconverted_amount * exchange_rate_reporting_period as converted_amount_using_reporting_month,&#10;    unconverted_amount * exchange_rate_transaction_period as converted_amount_using_transaction_accounting_period,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;income&apos;,&apos;other income&apos;,&apos;expense&apos;,&apos;other expense&apos;,&apos;other income&apos;,&apos;cost of goods sold&apos;) then true&#10;      else false&#10;      end as is_income_statement,&#10;    case&#10;      when lower(accounts.type_name) in (&apos;accounts receivable&apos;, &apos;bank&apos;, &apos;deferred expense&apos;, &apos;fixed asset&apos;, &apos;other asset&apos;, &apos;other current asset&apos;, &apos;unbilled receivable&apos;) then &apos;Asset&apos;&#10;      when lower(accounts.type_name) in (&apos;cost of goods sold&apos;, &apos;expense&apos;, &apos;other expense&apos;) then &apos;Expense&apos;&#10;      when lower(accounts.type_name) in (&apos;income&apos;, &apos;other income&apos;) then &apos;Income&apos;&#10;      when lower(accounts.type_name) in (&apos;accounts payable&apos;, &apos;credit card&apos;, &apos;deferred revenue&apos;, &apos;long term liability&apos;, &apos;other current liability&apos;) then &apos;Liability&apos;&#10;      when lower(accounts.type_name) in (&apos;equity&apos;, &apos;retained earnings&apos;, &apos;net income&apos;) then &apos;Equity&apos;&#10;      else null end as account_category&#10;  from transactions_in_every_calculation_period_w_exchange_rates&#10;  join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id&#10;)&#10;select&#10;  reporting_accounting_periods.accounting_period_id as ACCOUNTING_PERIOD_ID,&#10;  reporting_accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  reporting_accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  reporting_accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(reporting_accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(reporting_accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  transactions_with_converted_amounts.account_category as ACCOUNT_CATEGORY,&#10;  case&#10;    when (lower(accounts.is_balancesheet) = &apos;f&apos; and reporting_accounting_periods.year_id = transaction_accounting_periods.year_id) then &apos;Net Income&apos;&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then &apos;Retained Earnings&apos;&#10;    else accounts.name&#10;    end as ACCOUNT_NAME,&#10;  case&#10;    when (lower(accounts.is_balancesheet) = &apos;f&apos; and reporting_accounting_periods.year_id = transaction_accounting_periods.year_id) then &apos;Net Income&apos;&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then &apos;Retained Earnings&apos;&#10;    else accounts.type_name&#10;    end as ACCOUNT_TYPE_NAME,&#10;  case&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then null&#10;    else accounts.account_id&#10;    end as ACCOUNT_ID,&#10;  case&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then null&#10;    else accounts.accountnumber&#10;    end as ACCOUNT_NUMBER,&#10;  case&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; or lower(transactions_with_converted_amounts.account_category) = &apos;equity&apos; then -converted_amount_using_transaction_accounting_period&#10;    when lower(accounts.is_leftside) = &apos;f&apos; then -converted_amount_using_reporting_month&#10;    when lower(accounts.is_leftside) = &apos;t&apos; then converted_amount_using_reporting_month&#10;    else 0&#10;    end as CONVERTED_AMOUNT,&#10;  case&#10;    when lower(accounts.type_name) = &apos;bank&apos; then 1&#10;    when lower(accounts.type_name) = &apos;accounts receivable&apos; then 2&#10;    when lower(accounts.type_name) = &apos;unbilled receivable&apos; then 3&#10;    when lower(accounts.type_name) = &apos;other current asset&apos; then 4&#10;    when lower(accounts.type_name) = &apos;fixed asset&apos; then 5&#10;    when lower(accounts.type_name) = &apos;other asset&apos; then 6&#10;    when lower(accounts.type_name) = &apos;deferred expense&apos; then 7&#10;    when lower(accounts.type_name) = &apos;accounts payable&apos; then 8&#10;    when lower(accounts.type_name) = &apos;credit card&apos; then 9&#10;    when lower(accounts.type_name) = &apos;other current liability&apos; then 10&#10;    when lower(accounts.type_name) = &apos;long term liability&apos; then 11&#10;    when lower(accounts.type_name) = &apos;deferred revenue&apos; then 12&#10;    when lower(accounts.type_name) = &apos;equity&apos; then 13&#10;    when (lower(accounts.is_balancesheet) = &apos;f&apos; and reporting_accounting_periods.year_id = transaction_accounting_periods.year_id) then 15&#10;    when lower(accounts.is_balancesheet) = &apos;f&apos; then 14&#10;    else null&#10;    end as BALANCE_SHEET_SORT_HELPER&#10;from transactions_with_converted_amounts as transactions_with_converted_amounts&#10;join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id&#10;join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;join netsuite.accounting_periods as transaction_accounting_periods on transaction_accounting_periods.accounting_period_id = transactions_with_converted_amounts.transaction_accounting_period_id&#10;where reporting_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and transaction_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and (lower(accounts.is_balancesheet) = &apos;t&apos;&#10;    or transactions_with_converted_amounts.is_income_statement)&#10;&#10;union all&#10;&#10;select&#10;  reporting_accounting_periods.accounting_period_id as ACCOUNTING_PERIOD_ID,&#10;  reporting_accounting_periods.ending as ACCOUNTING_PERIOD_ENDING,&#10;  reporting_accounting_periods.full_name as ACCOUNTING_PERIOD_FULL_NAME,&#10;  reporting_accounting_periods.name as ACCOUNTING_PERIOD_NAME,&#10;  lower(reporting_accounting_periods.is_adjustment) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_ADJUSTMENT,&#10;  lower(reporting_accounting_periods.closed) = &apos;yes&apos; as IS_ACCOUNTING_PERIOD_CLOSED,&#10;  &apos;Equity&apos; as ACCOUNT_CATEGORY,&#10;  &apos;Cumulative Translation Adjustment&apos; as ACCOUNT_NAME,&#10;  &apos;Cumulative Translation Adjustment&apos; as ACCOUNT_TYPE_NAME,&#10;  null as ACCOUNT_ID,&#10;  null as ACCOUNT_NUMBER,&#10;  case&#10;    when lower(account_category) = &apos;equity&apos; or is_income_statement then converted_amount_using_transaction_accounting_period&#10;    else converted_amount_using_reporting_month &#10;    end as CONVERTED_AMOUNT,&#10;  16 as BALANCE_SHEET_SORT_HELPER&#10;from transactions_with_converted_amounts as transactions_with_converted_amounts&#10;join netsuite.accounts on accounts.account_id = transactions_with_converted_amounts.account_id&#10;join netsuite.accounting_periods as reporting_accounting_periods on reporting_accounting_periods.accounting_period_id = transactions_with_converted_amounts.reporting_accounting_period_id&#10;where reporting_accounting_periods.fiscal_calendar_id = (select fiscal_calendar_id from netsuite.subsidiaries where parent_id is null)&#10;  and (lower(accounts.is_balancesheet) = &apos;t&apos;&#10;    or transactions_with_converted_amounts.is_income_statement)</relation>
-        <metadata-records>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_ID</remote-name>
-            <remote-type>5</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_ID]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_ID</remote-alias>
-            <local-type>real</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_ENDING</remote-name>
-            <remote-type>7</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_ENDING]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_ENDING</remote-alias>
-            <local-type>datetime</local-type>
-            <aggregation>Year</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_FULL_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_FULL_NAME]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_FULL_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNTING_PERIOD_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNTING_PERIOD_NAME]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNTING_PERIOD_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-name>
-            <remote-type>11</remote-type>
-            <local-name>[IS_ACCOUNTING_PERIOD_ADJUSTMENT]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>IS_ACCOUNTING_PERIOD_ADJUSTMENT</remote-alias>
-            <local-type>boolean</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>IS_ACCOUNTING_PERIOD_CLOSED</remote-name>
-            <remote-type>11</remote-type>
-            <local-name>[IS_ACCOUNTING_PERIOD_CLOSED]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>IS_ACCOUNTING_PERIOD_CLOSED</remote-alias>
-            <local-type>boolean</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_CATEGORY</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_CATEGORY]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNT_CATEGORY</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_NAME]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNT_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_TYPE_NAME</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_TYPE_NAME]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNT_TYPE_NAME</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_ID</remote-name>
-            <remote-type>5</remote-type>
-            <local-name>[ACCOUNT_ID]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNT_ID</remote-alias>
-            <local-type>real</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>ACCOUNT_NUMBER</remote-name>
-            <remote-type>130</remote-type>
-            <local-name>[ACCOUNT_NUMBER]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>ACCOUNT_NUMBER</remote-alias>
-            <local-type>string</local-type>
-            <aggregation>Count</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>CONVERTED_AMOUNT</remote-name>
-            <remote-type>5</remote-type>
-            <local-name>[CONVERTED_AMOUNT]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>CONVERTED_AMOUNT</remote-alias>
-            <local-type>real</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-          <metadata-record class='column'>
-            <remote-name>BALANCE_SHEET_SORT_HELPER</remote-name>
-            <remote-type>20</remote-type>
-            <local-name>[BALANCE_SHEET_SORT_HELPER]</local-name>
-            <parent-name>[balance_sheet]</parent-name>
-            <remote-alias>BALANCE_SHEET_SORT_HELPER</remote-alias>
-            <local-type>integer</local-type>
-            <aggregation>Sum</aggregation>
-            <contains-null>true</contains-null>
-          </metadata-record>
-        </metadata-records>
-      </connection>
-      <aliases enabled='yes' />
-      <column aggregation='Sum' datatype='integer' name='[BALANCE_SHEET_SORT_HELPER]' role='dimension' type='ordinal' />
-      <column datatype='integer' name='[Number of Records]' role='measure' type='quantitative' user:auto-column='numrec'>
-        <calculation class='tableau' formula='1' />
-      </column>
-      <layout dim-ordering='alphabetic' dim-percentage='0.583663' measure-ordering='alphabetic' measure-percentage='0.416337' show-structure='true' />
-      <semantic-values>
-        <semantic-value key='[Country].[Name]' value='&quot;United States&quot;' />
-      </semantic-values>
-      <field-sort-info field-sort-order-type='custom-order'>
-        <field-sort-custom-order field='ACCOUNTING_PERIOD_ID' />
-        <field-sort-custom-order field='ACCOUNTING_PERIOD_ENDING' />
-        <field-sort-custom-order field='ACCOUNTING_PERIOD_FULL_NAME' />
-        <field-sort-custom-order field='ACCOUNTING_PERIOD_NAME' />
-        <field-sort-custom-order field='ACCOUNTING_PERIOD_IS_ADJUSTMENT' />
-        <field-sort-custom-order field='ACCOUNT_NAME' />
-        <field-sort-custom-order field='ACCOUNT_TYPE_NAME' />
-        <field-sort-custom-order field='ACCOUNT_ID' />
-        <field-sort-custom-order field='ACCOUNT_NUMBER' />
-        <field-sort-custom-order field='CONVERTED_AMOUNT' />
-        <field-sort-custom-order field='Calculation_68750306296590336' />
-        <field-sort-custom-order field='BALANCE_SHEET_SORT_HELPER' />
-        <field-sort-custom-order field='ACCOUNT_CATEGORY' />
-      </field-sort-info>
     </datasource>
   </datasources>
   <mapsources>
@@ -3369,8 +3369,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='1200' minheight='1200' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='62' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='84000' id='63' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
+            <zone h='100000' id='58' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='84000' id='59' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
                 <zone h='5250' id='7' type='title' w='98400' x='800' y='1000'>
                   <zone-style>
                     <format attr='border-color' value='#000000' />
@@ -3634,8 +3634,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='1200' minheight='1200' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='59' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='84000' id='60' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
+            <zone h='100000' id='55' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='84000' id='56' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
                 <zone fixed-size='38' h='5750' id='17' type='title' w='98400' x='800' y='1000'>
                   <zone-style>
                     <format attr='border-color' value='#000000' />
@@ -3958,8 +3958,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='1450' minheight='1450' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='117' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='84000' id='118' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
+            <zone h='100000' id='113' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='84000' id='114' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
                 <zone fixed-size='734' forceUpdate='true' h='5513' id='15' type='text' w='53000' x='800' y='1000'>
                   <formatted-text>
                     <run bold='true' fontcolor='#000000' fontsize='28'>Balance Sheet</run>
@@ -4306,8 +4306,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='1350' minheight='1350' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='123' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='84000' id='124' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
+            <zone h='100000' id='119' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='84000' id='120' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
                 <zone fixed-size='24' h='4000' id='7' type='title' w='98400' x='800' y='1000'>
                   <zone-style>
                     <format attr='border-color' value='#000000' />
@@ -4557,8 +4557,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='800' minheight='800' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='101' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='84000' id='102' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
+            <zone h='100000' id='97' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='98000' id='98' param='vert' type='layout-flow' w='98400' x='800' y='1000'>
                 <zone forceUpdate='true' h='12375' id='25' type='text' w='72899' x='800' y='1000'>
                   <formatted-text>
                     <run bold='true' fontcolor='#000000' fontsize='36'>Income Statement</run>
@@ -4815,8 +4815,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='1450' minheight='1450' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='100' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='98000' id='101' param='vert' type='layout-flow' w='98400' x='800' y='1000'>
+            <zone h='100000' id='96' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='98000' id='97' param='vert' type='layout-flow' w='98400' x='800' y='1000'>
                 <zone h='5250' id='22' type='title' w='98400' x='800' y='1000'>
                   <zone-style>
                     <format attr='border-color' value='#000000' />
@@ -5052,8 +5052,8 @@
         <devicelayout auto-generated='true' name='Phone'>
           <size maxheight='1450' minheight='1450' sizing-mode='vscroll' />
           <zones>
-            <zone h='100000' id='47' type='layout-basic' w='100000' x='0' y='0'>
-              <zone h='84000' id='48' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
+            <zone h='100000' id='43' type='layout-basic' w='100000' x='0' y='0'>
+              <zone h='84000' id='44' param='vert' type='layout-flow' w='84000' x='8000' y='8000'>
                 <zone h='5250' id='16' type='title' w='98400' x='800' y='1000'>
                   <zone-style>
                     <format attr='border-color' value='#000000' />
@@ -10382,84 +10382,917 @@
     </thumbnail>
     <thumbnail height='384' name='Revenue' width='384'>
       iVBORw0KGgoAAAANSUhEUgAAAYAAAAGACAYAAACkx7W/AAAACXBIWXMAAA7DAAAOwwHHb6hk
-      AAAQP0lEQVR4nO3df6yWdf3H8dfhHOEciB8SP2qD0MDWbLOBYo7madN+grSxVk1itUG1BtZq
-      aCaNcv1AQlRiLeds2TJ/rEXKwljRVtkSYxJJswwOjShYJEh4kJ/3Oef7h+P+eqRATUV9Px5/
-      wbk+13Wu+3POdT2v+7rP7rulr6+vLwCUM+B07wAAp4cAABQlAABFCQBAUQIAUJQAABQlAABF
-      CQBAUQIAUFTbqQb87Gc/y69+9askSUdHR9785jfn/e9/f9rb21/sfQPgRXTKZwBdXV2ZOHFi
-      5s2bl5kzZ2br1q258sor4x0kAF7ZntUtoNe97nWZNGlSJk+enEWLFuWf//xndu/e3Vy+cePG
-      3HrrrbnvvvvS29ubJNmwYUOOHTvWHHPs2LFs3LjxpOsc//r+/fuzevXq3H777dmxY0dz2e9/
-      //t++7Vx48bmur29vVm7dm1uvfXWPPTQQ89lDgBKes6vAfT19eXYsWNpa3vq7tGqVaty6623
-      ZsKECdm0aVO+9rWvJUnuvfferF+/vrne+vXrs3r16pOukyTXXHNNPv3pT2f//v1paWnJ/Pnz
-      myf5r3/96/32ZenSpenp6UmSLF68OJs2bcqECRNyyy23ZM2aNc/1oQGUcsrXAJJk586deeSR
-      R7J///7ce++9mTJlSkaNGpW+vr58//vfz5133pkhQ4bkXe96Vz7ykY/kX//6V2bMmJE1a9ak
-      s7MzSbJ27drMmjXrpOuMGTMmgwcPzm233ZbW1tYkyS9+8Ys88cQTGTFixH/dv61bt2bv3r3N
-      QJx//vmZP39+Lrvssv91fgBetZ5VADZs2JDNmzdn06ZNWbx4cd7znvckSR577LH09PTkxz/+
-      cXNsa2tr/va3v+Wiiy7KsmXL8uSTTyZJtmzZkgsuuOCk64wZMyatra3Nk//xZad6vaGrqytJ
-      cvvttze/tnfv3jQajeYzFQD6e1Znx1mzZmXGjBm5/vrrs27dulx66aUZOHBgBg0alNbW1kyY
-      MKE59hOf+ETe+MY3prW1NZdcckl++ctfpq+vL5deemkGDBhw0nWer0GDBmXw4MH9tvmlL30p
-      LS0tz3ubAK92z/o1gJaWllx11VUZO3Zsrrrqqhw9ejTDhw9PR0dHRo4cmc7OznR2dmbcuHHN
-      K/YZM2Zk7dq1Wbt2bfN2zKnWOZkjR4407/nv3r073d3dSZK3vOUt2b59e84777x0dnbm4osv
-      Tnt7e79nEgD0d8pnAC0tLc0r6ZaWlnz+85/PsmXLsnDhwtx00035whe+kEWLFmXcuHFpNBpJ
-      /v/F2kmTJqW7uzsDBw7MG97whuY2T7bOM6/an/79p0yZknnz5mXo0KE5ePBgGo1GWlpaMnbs
-      2Fx++eWZM2dOJk2alD179mTixIm58MIL/9f5AXjVankhPhKyt7c3u3fvzrBhwzJkyJB+y47/
-      Nc+wYcOe9Tr/TV9fX/7+979n0KBBGTt27AnLjxw5kr1792bUqFEZOHDg839AAAW8IAEA4JXH
-      ewEBFCUAAEUJAEBRAgBQ1Al/Bjpt2rRMmzbtdOwLAC+h/xiAhQsXno59AeAl5BYQQFECAFCU
-      AAAUJQAARQkAQFECAFCUAAAUJQC8LB05ciSrV68+5bje3t4cPXr0Bf/+R48ebX740KvJD3/4
-      w2c17ujRo6f8kKbDhw+fdP1X4/y93OzcuTO//e1vTznuPx0nPT09AsDp09fX1+8k02g0mh8Q
-      1NPTk23btjWXHTly5IR1k+Qf//hH7r777lNu+8iRI6c8oTUajfT29iZJ7rnnnvz1r399jo/o
-      5eH4Yzju6XO3ZcuW5r+fPt/HHZ+jlStXnjDnz9z28uXL/+uyZ85fX1/ff9wep3ay4+TAgQPZ
-      uXNnc9lzOU4efPDBZ/eZwPBC27x5c2677ba89rWvzaxZs9Ld3Z2f/vSnaTQa+fCHP5xzzjkn
-      yVO/0IsXL87rX//6nHHGGVmwYEGWLFmSAQMG5KyzzsquXbvyhz/8If/+97/zmc98Jkny8MMP
-      54477sjQoUPzyU9+Mj/4wQ/S09OTXbt25dprr80dd9yRefPmpb29PcuXL8/cuXNzxRVX5Lzz
-      zsuf//znrFy5MmvXrs3DDz+cqVOnpqOjI9u2bcvWrVtz/vnn501velPe9ra35brrrstnP/vZ
-      dHR0nM6p7OerX/1qWltbM3z48CxYsCA33HBD2trasnPnzlx33XXNcQ8++GC/+R45cmRWrFiR
-      kSNH5qKLLsr69evTaDRy4YUX5pJLLklfX18WLlyY0aNHZ/z48RkzZkw2bNiQG264IXPmzMk9
-      99yTJ554Ijt37syXv/zlfvN38cUXZ+nSpRkzZkzGjx+fyy+//DTO0CvLqY6T9vb2JM/vOFm1
-      apUAcHrs27cvo0ePzuzZs3PWWWflmmuuydy5c9PT05O77rorV199dZLk/vvvz+TJkzN16tR8
-      61vfypYtWzJu3Lh87GMfS5Ls2LEjo0ePzkc/+tHmtletWpUlS5akra0t3d3daTQaufrqq/Po
-      o49mzZo1/a6SDh8+nL6+vnR2duZTn/pUVqxYkdbW1rzvfe/LlClTcs455zTXWbFiRQ4ePJiv
-      fOUrmTx5cg4dOvSyOvknyeOPP56ZM2dm2rRp6e7uzmOPPZaPf/zjWbduXTZv3twct3r16n7z
-      3dHRkWuvvTZDhw5NkmzatClXXHFF8wSTPHW1+cEPfjBTp05NW1tbNmzY0HzbmOnTp+d3v/td
-      duzYkX379vWbv+9+97uZMWNGxo8fn5tvvlkAnoNTHSezZ89O8vyOkw984ANuAXF6vOMd78js
-      2bPzk5/8JD/60Y9y5MiRdHV1Zfv27Zk1a1ZzXKPRyK5du9LV1ZX3vve9aTQaOeOMM5rLW1pa
-      TrjlkSQDBjz1q93b25vW1tYkSVtbW3Psf7sd9PTPpH76mHe+851JksGDB+fMM8/M3XffnXe/
-      +93P9+G/aJYuXZok+dznPpeenp48/vjj6erqytlnn53x48c3xz1zvnt7e9PW1v968Onz2tLS
-      khtvvDH79u3LokWLkvz//Bw9ejQ33XRT3v72t+eCCy44YY4bjUZ27NiRrq6uzJgx48V78K9C
-      L+Zx0tLSIgCcHvfff3/ztsGQIUMyc+bM/OY3v8mjjz6a7du3N8d1dnZm+/bt2bZtWzZs2JBz
-      zz03jzzySL75zW/mzjvvzJgxY/LAAw/kO9/5TnOd6dOnZ9GiRVm2bFkOHjyYw4cP59vf/nZW
-      rlyZ6dOn5+yzz87SpUuzZMmSdHd399uv4wE499xzc8stt+S+++47Yd/nzJmT733vey/Ld829
-      /vrrs3Xr1rS3t2f48OEZN25c/vKXv+Shhx7KwYMHm+OeOd8f+tCH8sUvfjE33nhj/vSnP+Wt
-      b31rvvGNb+TXv/51kuTQoUNZvnx5duzYkcGDByd56tnTzTffnD179uTQoUNZvXp11q1bl6T/
-      /F122WXZuHFjtm3blj/+8Y8v/aS8gr2Yx8nEiRNP/EzgK6+80ruB8pI4cOBAent7M2zYsCTJ
-      sWPH0mg0Trit0tfXlwMHDuQ1r3lN8wTd3d3d/P+xY8dy+PDh5u2L/7StPXv2ZMSIEc2r3D17
-      9mT48OH9rpKe6cknn0xra2u/2yBJsnXr1vz85z/PggUL/vdJeIH19vZm7969GTlyZPOZz4ED
-      B9LR0dH8/3HPnKOenp4cPnw4Q4YMSfLUHLe3tzfnqNFoZN++fRk1alTzinL//v0ZMWJE82dw
-      /GeZ9J+/4z/Dp/+MeHZezONEAOA52LdvX+66667MnTv3hDDAK40XgeE5OPPMMzN//vzTvRvw
-      gvAaAEBRAgBQlAAAFCUAAEUJAEBRAgBQlAAAFCUAAEUJAEBRAgBQlAAAFCUAAEUJAEBRAgBQ
-      lAAAFCUAAEUJAEBRAgBQlAAAFCUAAEUJAEBRAgBQlAAAFCUAAEUJAEBRAgBQlAAAFCUAAEUJ
-      AEBRAgBQVNszv/DAAw+cjv0A4CXW0tfX13e6dwKAl55bQABFCQBAUQIAUJQAABQlAABFCQBA
-      UQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQl
-      AABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIA
-      UJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABF
-      CQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQA
-      ABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBA
-      UQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQl
-      AABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIA
-      UJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABF
-      CQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQA
-      ABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBA
-      UQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQl
-      AABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIA
-      UJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABF
-      CQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQA
-      ABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBA
-      UQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQl
-      AABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIA
-      UJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABF
-      CQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQA
-      ABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBA
-      UQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQlAABFCQBAUQIAUJQAABQl
-      AABF/R/jsTFHMloWTQAAAABJRU5ErkJggg==
+      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
     </thumbnail>
     <thumbnail height='384' name='Sales Orders' width='384'>
       iVBORw0KGgoAAAANSUhEUgAAAYAAAAGACAYAAACkx7W/AAAACXBIWXMAAA7DAAAOwwHHb6hk
