@@ -77,7 +77,7 @@ with transactions_with_converted_amounts as (
       on exchange_transaction_period.accounting_period_id = transactions_in_every_calculation_period.transaction_accounting_period_id
       and exchange_transaction_period.account_id = transactions_in_every_calculation_period.account_id
       and exchange_transaction_period.from_subsidiary_id = transactions_in_every_calculation_period.subsidiary_id
-  )
+  ), transactions_with_converted_amounts as (
   select
     transactions_in_every_calculation_period_w_exchange_rates.*,
     unconverted_amount * exchange_rate_reporting_period as converted_amount_using_reporting_month,
