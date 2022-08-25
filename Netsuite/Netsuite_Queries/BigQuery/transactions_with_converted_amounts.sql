@@ -1,5 +1,4 @@
-with transactions_with_converted_amounts as (
-  with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */
+with period_exchange_rate_map as ( /* exchange rates used, by accounting period, to convert to parent subsidiary */
     select
       consolidated_exchange_rates.accounting_period_id,
       consolidated_exchange_rates.average_rate,
@@ -95,4 +94,3 @@ with transactions_with_converted_amounts as (
       else null end as account_category
   from transactions_in_every_calculation_period_w_exchange_rates
   join netsuite.accounts on accounts.account_id = transactions_in_every_calculation_period_w_exchange_rates.account_id
-)
